@@ -1,0 +1,26 @@
+SQL
+CREATE TABLE staging.forcam.cycle_time (
+   id INT INDENTITY(1,1) PRIMARY KEY, 
+   machine_name NVARCHAR(100),
+   [date] DATE,
+   [time] TIME(0),
+    workplace NVARCHAR(50),
+    ordernumber NVARCHAR(50),
+    operationnumber NVARCHAR(50),
+    materialnumber NVARCHAR(50),
+    te_sap REAL,
+    preparation_time REAL,
+    machine_cycle_time REAL,
+    button_to_button_time REAL,
+    stroke_factor REAL,
+    cure_period REAL,
+    cure_period_factor REAL,
+    dstcalc REAL,
+    state NVARCHAR(50),
+    status_reason NVARCHAR(50),
+    plangroup NVARCHAR(50),
+    plangroup_counter NVARCHAR(50),
+    script_version NVARCHAR(50),
+    counter_total NVARCHAR(50),
+  uuid AS CONCAT(workplace, '-', REPLACE(materialnumber, '-', ''), '-', operationnumber, '-', plangroup, '-', plangroup_counter) PERSISTED
+)
