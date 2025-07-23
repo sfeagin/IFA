@@ -1,4 +1,5 @@
 SQL
+https://force:19443/ffnewoffice/?state=home.performanceanalysis.reporting#!home.performanceanalysis.reporting/&target_object_id=ea4c1d60-66c2-439b-b9ae-0e3da899941f
 CREATE TABLE staging.forcam.cycle_time (
    id INT INDENTITY(1,1) PRIMARY KEY, 
    machine_name NVARCHAR(100),
