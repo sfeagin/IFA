@@ -1,0 +1,389 @@
+IF OBJECT_ID('staging.forcam.cycle_time') IS NOT NULL
+    DROP TABLE staging.forcam.cycle_time
+-- Set the database context
+USE staging
+GO
+
+-- Table: cycle_time
+CREATE TABLE staging.forcam.cycle_time (
+   id INT IDENTITY(1,1) PRIMARY KEY, 
+   machine_name NVARCHAR(100),
+   [date] DATE,
+   [time] TIME(0),
+   workplace NVARCHAR(50),
+   ordernumber NVARCHAR(50),
+   operationnumber NVARCHAR(50),
+   materialnumber NVARCHAR(50),
+   te_sap REAL,
+   undefinedstoppage REAL,
+   refillingoperationalmaterials REAL,
+   machinewaitingonmaterial REAL,
+   shiftchangeover REAL,
+   preparation_time REAL,
+   machine_cycle_time REAL,
+   button_to_button_time REAL,
+   stroke_factor REAL,
+   cure_period REAL,
+   cure_period_factor REAL,
+   dstcalc REAL,
+   state NVARCHAR(50),
+   status_reason NVARCHAR(50),
+   plangroup NVARCHAR(50),
+   plangroup_counter NVARCHAR(50),
+   script_version NVARCHAR(50),
+   counter_total NVARCHAR(50),
+   uuid AS CONCAT(workplace, '-', REPLACE(materialnumber, '-', ''), '-', operationnumber, '-', plangroup, '-', plangroup_counter) PERSISTED
+)
+GO
+IF OBJECT_ID('staging.forcam.thresholds') IS NOT NULL
+    DROP TABLE staging.forcam.thresholds
+GO
+-- Add computed column for thresholds (optional: could skip if using separate logic)
+ALTER TABLE staging.forcam.cycle_time
+ADD cycle_time_status AS (
+    CASE 
+        WHEN machine_cycle_time < 5 THEN 'TOO_SHORT'
+        WHEN machine_cycle_time > 600 THEN 'TOO_LONG'
+        ELSE 'Good'
+    END
+) PERSISTED
+GO
+
+-- Drop view if exists before creating
+IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+    DROP VIEW staging.forcam.cycle_time_with_status
+GO
+-- Table: thresholds per machine
+CREATE TABLE staging.forcam.thresholds (
+    machine_name NVARCHAR(100) PRIMARY KEY,
+    min_cycle_time REAL,
+    max_cycle_time REAL
+)
+GO
+
+-- Example: selecting all rows with static thresholds
+SELECT *
+FROM staging.forcam.cycle_time
+WHERE machine_cycle_time < 5 OR machine_cycle_time > 600
+GO
+
+-- Join logic using dynamic thresholds
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+
+-- Create a view for Power BI to access machine performance
+CREATE VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+-- Mode calculation: most frequent values per uuid + ordernumber
+-- (Replace 'SOME_UUID' and 'SOME_ORDERNUMBER' with variables in dynamic SQL/stored proc)
+
+SELECT TOP 1 WITH TIES machine_cycle_time AS mode_machine_cycle_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY machine_cycle_time
+ORDER BY COUNT(*) DESC
+GO
+
+SELECT TOP 1 WITH TIES preparation_time AS mode_preparation_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY preparation_time
+ORDER BY COUNT(*) DESC
+GO
+
+-- IQR calculation: requires SQL Server 2022+ for PERCENTILE_CONT
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY machine_cycle_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY machine_cycle_time) AS machine_cycle_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY preparation_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY preparation_time) AS preparation_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+-- Optional: You can materialize this into a separate view if needed
+-- Live filtering based on dynamic thresholds per machine
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+
+-- View for Power BI or reporting
+IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+    DROP VIEW staging.forcam.cycle_time_with_status
+GO
+
+CREATE VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+-- Mode calculation: most frequent values per uuid + ordernumber
+-- (Replace 'SOME_UUID' and 'SOME_ORDERNUMBER' with variables in dynamic SQL/stored proc)
+
+SELECT TOP 1 WITH TIES machine_cycle_time AS mode_machine_cycle_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY machine_cycle_time
+ORDER BY COUNT(*) DESC
+GO
+
+SELECT TOP 1 WITH TIES preparation_time AS mode_preparation_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY preparation_time
+ORDER BY COUNT(*) DESC
+GO
+
+-- IQR calculation: requires SQL Server 2022+ for PERCENTILE_CONT
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY machine_cycle_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY machine_cycle_time) AS machine_cycle_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY preparation_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY preparation_time) AS preparation_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+-- Optional: You can materialize this into a separate view if needed
+-- Live filtering based on dynamic thresholds per machine
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+
+-- View for Power BI or reporting
+IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+    DROP VIEW staging.forcam.cycle_time_with_status
+GO
+
+CREATE VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+
+-- Mode calculation: most frequent values per uuid + ordernumber
+-- (Replace 'SOME_UUID' and 'SOME_ORDERNUMBER' with variables in dynamic SQL/stored proc)
+
+SELECT TOP 1 WITH TIES machine_cycle_time AS mode_machine_cycle_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY machine_cycle_time
+ORDER BY COUNT(*) DESC
+GO
+
+SELECT TOP 1 WITH TIES preparation_time AS mode_preparation_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY preparation_time
+ORDER BY COUNT(*) DESC
+GO
+
+-- IQR calculation: requires SQL Server 2022+ for PERCENTILE_CONT
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY machine_cycle_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY machine_cycle_time) AS machine_cycle_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY preparation_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY preparation_time) AS preparation_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+-- Optional: You can materialize this into a separate view if needed
+-- Live filtering based on dynamic thresholds per machine
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+
+-- View for Power BI or reporting
+IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+    DROP VIEW staging.forcam.cycle_time_with_status
+GO
+
+CREATE VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+-- Mode calculation: most frequent values per uuid + ordernumber
+-- (Replace 'SOME_UUID' and 'SOME_ORDERNUMBER' with variables in dynamic SQL/stored proc)
+SELECT TOP 1 WITH TIES machine_cycle_time AS mode_machine_cycle_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY machine_cycle_time
+ORDER BY COUNT(*) DESC
+GO
+SELECT TOP 1 WITH TIES preparation_time AS mode_preparation_time
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GROUP BY preparation_time
+ORDER BY COUNT(*) DESC
+GO
+
+-- IQR calculation: requires SQL Server 2022+ for PERCENTILE_CONT
+
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY machine_cycle_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY machine_cycle_time) AS machine_cycle_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+SELECT
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY preparation_time) -
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY preparation_time) AS preparation_time_iqr
+FROM staging.forcam.cycle_time
+WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
+GO
+
+-- Optional: You can materialize this into a separate view if needed
+-- Live filtering based on dynamic thresholds per machine
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
+
+-- View for Power BI or reporting
+IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+    DROP VIEW staging.forcam.cycle_time_with_status
+GO
+
+CREATE VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+GO
