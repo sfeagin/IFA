@@ -1,0 +1,8 @@
+project_root/
+├── ml_inventory_forecast_multisource.py
+├── models/
+│   ├── consumption_forecast.pkl
+│   ├── replenishment_classifier.pkl
+│   └── inventory_anomaly.pkl
+├── emait_updates.csv
+└── logs/
