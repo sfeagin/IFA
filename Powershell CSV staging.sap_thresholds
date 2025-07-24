@@ -1,0 +1,64 @@
+# CONFIGURATION
+$csvPath = "C:\Data\SAP\machine_thresholds.csv"  # Path to SAP-exported file
+$logPath = "C:\Logs\threshold_import.log"
+$sqlServer = "YOUR_SQL_SERVER"
+$database = "staging"
+$table = "sap_thresholds"
+$schema = "staging"
+
+# LOGGING FUNCTION
+function Log-Message {
+    param ([string]$message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $logPath -Value "$timestamp - $message"
+}
+
+try {
+    Log-Message "Starting import of SAP threshold CSV..."
+
+    # Import CSV data into DataTable
+    $data = Import-Csv -Path $csvPath
+
+    if ($data.Count -eq 0) {
+        Log-Message "CSV file is empty. Exiting script."
+        return
+    }
+
+    # Connect to SQL and clear old table
+    $conn = New-Object System.Data.SqlClient.SqlConnection
+    $conn.ConnectionString = "Server=$sqlServer;Database=$database;Integrated Security=True;"
+    $conn.Open()
+
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandText = "TRUNCATE TABLE [$schema].[$table];"
+    $cmd.ExecuteNonQuery()
+
+    # Bulk insert using SqlBulkCopy
+    $bulkCopy = New-Object Data.SqlClient.SqlBulkCopy($conn)
+    $bulkCopy.DestinationTableName = "[$schema].[$table]"
+
+    foreach ($col in $data[0].PSObject.Properties.Name) {
+        $bulkCopy.ColumnMappings.Add($col, $col) | Out-Null
+    }
+
+    $dt = New-Object System.Data.DataTable
+    foreach ($col in $data[0].PSObject.Properties.Name) {
+        [void]$dt.Columns.Add($col)
+    }
+
+    foreach ($row in $data) {
+        $dr = $dt.NewRow()
+        foreach ($col in $data[0].PSObject.Properties.Name) {
+            $dr[$col] = $row.$col
+        }
+        $dt.Rows.Add($dr)
+    }
+
+    $bulkCopy.WriteToServer($dt)
+    $conn.Close()
+
+    Log-Message "Successfully imported SAP threshold data."
+}
+catch {
+    Log-Message "Error occurred: $_"
+}
