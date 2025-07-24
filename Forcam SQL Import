@@ -1,0 +1,109 @@
+-- ===============================================
+-- SQL Import Script for Forecam CSV to cycle_time
+-- ===============================================
+-- This script is triggered by PowerShell with parameters:
+--   $(FilePath)     : Full CSV path (e.g., \\server\machineX\20250720_data.csv)
+--   $(MachineName)  : Folder name for the machine (e.g., "MachineX")
+
+-- STEP 1: Create a temporary staging table matching CSV layout
+CREATE TABLE #temp_cycle_time (
+    [date] DATE,
+    [time] TIME(0),
+    workplace NVARCHAR(50),
+    ordernumber NVARCHAR(50),
+    operationnumber NVARCHAR(50),
+    materialnumber NVARCHAR(50),
+    te_sap REAL,
+    undefinedstoppage REAL,
+    refillingoperationalmaterials REAL,
+    machinewaitingonmaterial REAL,
+    shiftchangeover REAL,
+    preparation_time REAL,
+    machine_cycle_time REAL,
+    button_to_button_time REAL,
+    stroke_factor REAL,
+    cure_period REAL,
+    cure_period_factor REAL,
+    dstcalc REAL,
+    state NVARCHAR(50),
+    status_reason NVARCHAR(50),
+    plangroup NVARCHAR(50),
+    plangroup_counter NVARCHAR(50),
+    script_version NVARCHAR(50),
+    counter_total NVARCHAR(50)
+);
+GO
+
+-- STEP 2: Load CSV data into temporary table using BULK INSERT
+BULK INSERT #temp_cycle_time
+FROM '$(FilePath)'
+WITH (
+    FORMATFILE = '\\SUSA059A59\Output_Prod\Cycle_Time_ChsP.xml',
+    FIRSTROW = 2,
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    ERRORFILE = '$(FilePath).error',
+    TABLOCK
+);
+GO
+
+-- STEP 3: Insert into the main table with machine name and computed UUID
+INSERT INTO staging.forcam.cycle_time (
+    machine_name,
+    [date],
+    [time],
+    workplace,
+    ordernumber,
+    operationnumber,
+    materialnumber,
+    te_sap,
+    undefinedstoppage,
+    refillingoperationalmaterials,
+    machinewaitingonmaterial,
+    shiftchangeover,
+    preparation_time,
+    machine_cycle_time,
+    button_to_button_time,
+    stroke_factor,
+    cure_period,
+    cure_period_factor,
+    dstcalc,
+    state,
+    status_reason,
+    plangroup,
+    plangroup_counter,
+    script_version,
+    counter_total
+)
+SELECT
+    $(MachineName),  -- Injected by PowerShell
+    [date],
+    [time],
+    workplace,
+    ordernumber,
+    operationnumber,
+    materialnumber,
+    te_sap,
+    undefinedstoppage,
+    refillingoperationalmaterials,
+    machinewaitingonmaterial,
+    shiftchangeover,
+    preparation_time,
+    machine_cycle_time,
+    button_to_button_time,
+    stroke_factor,
+    cure_period,
+    cure_period_factor,
+    dstcalc,
+    state,
+    status_reason,
+    plangroup,
+    plangroup_counter,
+    script_version,
+    counter_total
+FROM #temp_cycle_time;
+GO
+
+-- STEP 4: Clean up the temp table
+DROP TABLE #temp_cycle_time;
+GO
