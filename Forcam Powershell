@@ -1,97 +1,130 @@
-# ================================
-# Combined PowerShell Script: import-forecam-csv-combined.ps1
-# ================================
-# Features:
-# 1. Imports yesterday’s CSV files on startup
-# 2. Monitors for newly created files (real-time)
-# 3. Writes detailed logs
-# 4. Ensures all imported data is time-relevant
+# ==============================
+# Enhanced PowerShell Script: import-forecam-csv.ps1
+# ==============================
+# Implements robust logging, error handling, retry logic, modular design
+# and configurability for importing Forecam CSV data to SQL Server
 
-# CONFIGURATION
-$RootPath   = "\\SUSA059A59\Output_Prod"            # Root folder of machine directories
-$SqlScript  = "C:\Scripts\import_cycle_time.sql"    # SQL file that runs BULK INSERT logic
-$SqlServer  = "YourSqlServerName"                   # SQL Server name
-$Database   = "staging"                             # SQL Database
-$LogFile    = "C:\Logs\forecam_import.log"          # Log file path
+Set-StrictMode -Version Latest
 
-# LOGGING FUNCTION
-function Log {
-    param([string]$message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $LogFile -Value "$timestamp - $message"
+# --- CONFIGURATION ---
+$Config = @{ 
+    RootPath    = "\\SUSA059A59\Output_Prod"
+    SqlScript   = "C:\Scripts\import_cycle_time.sql"
+    SqlServer   = "YourSqlServerName"
+    Database    = "staging"
+    LogFile     = "C:\Logs\forecam_import.log"
+    MaxRetries  = 3
+    DateFormat  = "yyyyMMdd"
+    ImportDate  = (Get-Date).AddDays(-1).ToString("yyyyMMdd") # Can be changed to support a range
 }
 
-# IMPORT FUNCTION
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+    Add-Content -Path $Config.LogFile -Value $logEntry
+}
+
+function Wait-For-FileUnlock {
+    param ([string]$Path)
+    for ($i = 0; $i -lt 5; $i++) {
+        try {
+            $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+            if ($stream) { $stream.Close(); return $true }
+        } catch {
+            Start-Sleep -Seconds 2
+        }
+    }
+    return $false
+}
+
 function Import-CsvFile {
     param(
         [string]$FilePath,
-        [string]$MachineName
+        [string]$MachineName,
+        [string]$BackupPath,
+        [string]$ErrorPath
     )
 
-    try {
-        Log "Importing file: $FilePath for machine: $MachineName"
+    if (-not (Wait-For-FileUnlock -Path $FilePath)) {
+        Write-Log "File is locked: $FilePath" "ERROR"
+        Move-Item -Path $FilePath -Destination $ErrorPath -Force
+        return
+    }
 
-        & sqlcmd -S $SqlServer -d $Database -i $SqlScript `
-            -v FilePath="'$FilePath'" `
-            -v MachineName="'$MachineName'" `
-            -b
+    for ($attempt = 1; $attempt -le $Config.MaxRetries; $attempt++) {
+        Write-Log "Attempt $attempt: Importing file $FilePath"
+        $result = & sqlcmd -S $Config.SqlServer -d $Config.Database -i $Config.SqlScript `
+            -v FilePath="'$FilePath'" -v MachineName="'$MachineName'" -b 2>&1
 
         if ($LASTEXITCODE -eq 0) {
-            $BackupPath = Join-Path (Split-Path $FilePath -Parent) "Backup"
-            New-Item -Path $BackupPath -ItemType Directory -Force | Out-Null
-            Move-Item -Path $FilePath -Destination $BackupPath
-            Log "Successfully imported and moved to Backup: $FilePath"
+            Move-Item -Path $FilePath -Destination $BackupPath -Force
+            Write-Log "SUCCESS: Imported and moved $FilePath to Backup"
+            return
         } else {
-            $ErrorPath = Join-Path (Split-Path $FilePath -Parent) "Error"
-            New-Item -Path $ErrorPath -ItemType Directory -Force | Out-Null
-            Move-Item -Path $FilePath -Destination $ErrorPath
-            Log "ERROR: Import failed. Moved to Error: $FilePath"
+            Write-Log "FAILED: Attempt $attempt for $FilePath. Error: $result" "ERROR"
+            Start-Sleep -Seconds 2
         }
-    } catch {
-        Log "EXCEPTION: $($_.Exception.Message)"
     }
+
+    Move-Item -Path $FilePath -Destination $ErrorPath -Force
+    Write-Log "FINAL FAILURE: Moved $FilePath to Error folder after $Config.MaxRetries attempts." "ERROR"
 }
 
-# ================================
-# INITIAL YESTERDAY IMPORT
-# ================================
-$yesterday = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
-$folders = Get-ChildItem -Path $RootPath -Directory
+function Import-All-Machines {
+    Write-Log "Starting batch import for date $($Config.ImportDate)"
+    $folders = Get-ChildItem -Path $Config.RootPath -Directory
+    foreach ($folder in $folders) {
+        $MachineName = $folder.Name
+        $MachinePath = Join-Path $Config.RootPath $MachineName
+        $BackupPath  = Join-Path $MachinePath "Backup"
+        $ErrorPath   = Join-Path $MachinePath "Error"
 
-foreach ($folder in $folders) {
-    $MachineName = $folder.Name
-    $MachinePath = Join-Path $RootPath $MachineName
-    $csvFiles = Get-ChildItem -Path $MachinePath -Filter "$yesterday*.csv" -File
+        New-Item -ItemType Directory -Path $BackupPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $ErrorPath -Force | Out-Null
 
-    foreach ($file in $csvFiles) {
-        Import-CsvFile -FilePath $file.FullName -MachineName $MachineName
+        $csvFiles = Get-ChildItem -Path $MachinePath -Filter "$($Config.ImportDate)*.csv" -File
+        foreach ($file in $csvFiles) {
+            Import-CsvFile -FilePath $file.FullName -MachineName $MachineName `
+                           -BackupPath $BackupPath -ErrorPath $ErrorPath
+        }
     }
+    Write-Log "Batch import completed."
 }
 
-# ================================
-# FILE WATCHER: LIVE STREAM
-# ================================
+function Log-Heartbeat {
+    Write-Log "[HEARTBEAT] Watcher running..."
+}
+
+# --- FILE WATCHER FOR LIVE STREAM ---
 $watcher = New-Object System.IO.FileSystemWatcher
-$watcher.Path = $RootPath
+$watcher.Path = $Config.RootPath
 $watcher.IncludeSubdirectories = $true
 $watcher.Filter = "*.csv"
 $watcher.EnableRaisingEvents = $true
 
 Register-ObjectEvent $watcher "Created" -Action {
-    $file = $Event.SourceEventArgs.FullPath
-    $folder = Split-Path $file -Parent
-    $machineName = Split-Path $folder -Leaf
+    Start-Sleep -Seconds 5
+    $filePath = $Event.SourceEventArgs.FullPath
+    $machineName = Split-Path $filePath -Parent | Split-Path -Leaf
+    $machineFolder = Join-Path $Config.RootPath $machineName
+    $backup = Join-Path $machineFolder "Backup"
+    $error  = Join-Path $machineFolder "Error"
 
-    Start-Sleep -Seconds 5  # Let the file finish writing
-    $fileDate = ([System.IO.Path]::GetFileNameWithoutExtension($file)) -replace '[^\d]', ''
-    $today = (Get-Date).ToString("yyyyMMdd")
+    New-Item -ItemType Directory -Path $backup -Force | Out-Null
+    New-Item -ItemType Directory -Path $error -Force | Out-Null
 
-    if ($fileDate -eq $today) {
-        Log "Live stream: New file detected for today: $file"
-        Import-CsvFile -FilePath $file -MachineName $machineName
-    } else {
-        Log "Live stream: File skipped (not from today): $file"
-    }
+    Import-CsvFile -FilePath $filePath -MachineName $machineName `
+                   -BackupPath $backup -ErrorPath $error
 }
 
-Log "Watcher active. Monitoring for real-time updates..."
+# --- OPTIONAL: Run batch import on script startup ---
+Import-All-Machines
+
+# --- OPTIONAL: Log heartbeat every hour to confirm watcher health ---
+Register-ScheduledJob -Name "WatcherHeartbeat" -ScriptBlock {
+    Write-Log "[HEARTBEAT] Watcher is active."
+} -Trigger (New-JobTrigger -Once -At (Get-Date).AddMinutes(60) -RepetitionInterval (New-TimeSpan -Minutes 60) -RepetitionDuration ([TimeSpan]::MaxValue)) -ScheduledJobOption (New-ScheduledJobOption -RunElevated) | Out-Null
