@@ -1,0 +1,105 @@
+-- ================================
+-- View: Minute-Level Summary
+-- ================================
+CREATE OR ALTER VIEW forcam.vw_minute_summary AS
+SELECT
+    machine_name,
+    DATEADD(MINUTE, DATEDIFF(MINUTE, 0, timestamp), 0) AS minute_block,
+    COUNT(*) AS total_cycles,
+    AVG(machine_cycle_time) AS avg_cycle_time,
+    MIN(timestamp) AS first_entry,
+    MAX(timestamp) AS last_entry
+FROM staging.forcam.cycle_time
+GROUP BY
+    machine_name,
+    DATEADD(MINUTE, DATEDIFF(MINUTE, 0, timestamp), 0);
+GO
+
+-- ================================
+-- View: Hourly Summary
+-- ================================
+CREATE OR ALTER VIEW forcam.vw_hourly_summary AS
+SELECT
+    machine_name,
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, timestamp), 0) AS hour_block,
+    COUNT(*) AS total_cycles,
+    AVG(machine_cycle_time) AS avg_cycle_time,
+    MIN(timestamp) AS first_entry,
+    MAX(timestamp) AS last_entry
+FROM staging.forcam.cycle_time
+GROUP BY
+    machine_name,
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, timestamp), 0);
+GO
+
+-- ================================
+-- View: Daily Summary
+-- ================================
+CREATE OR ALTER VIEW forcam.vw_daily_summary AS
+SELECT
+    machine_name,
+    CAST(timestamp AS DATE) AS day_block,
+    COUNT(*) AS total_cycles,
+    AVG(machine_cycle_time) AS avg_cycle_time,
+    MIN(timestamp) AS first_entry,
+    MAX(timestamp) AS last_entry
+FROM staging.forcam.cycle_time
+GROUP BY
+    machine_name,
+    CAST(timestamp AS DATE);
+GO
+
+-- ================================
+-- View: Weekly Summary (ISO Week)
+-- ================================
+CREATE OR ALTER VIEW forcam.vw_weekly_summary AS
+SELECT
+    machine_name,
+    DATEPART(YEAR, timestamp) AS year,
+    DATEPART(ISO_WEEK, timestamp) AS iso_week,
+    COUNT(*) AS total_cycles,
+    AVG(machine_cycle_time) AS avg_cycle_time,
+    MIN(timestamp) AS first_entry,
+    MAX(timestamp) AS last_entry
+FROM staging.forcam.cycle_time
+GROUP BY
+    machine_name,
+    DATEPART(YEAR, timestamp),
+    DATEPART(ISO_WEEK, timestamp);
+GO
+
+-- ================================
+-- View: Monthly Summary
+-- ================================
+CREATE OR ALTER VIEW forcam.vw_monthly_summary AS
+SELECT
+    machine_name,
+    FORMAT(timestamp, 'yyyy-MM') AS month_block,
+    COUNT(*) AS total_cycles,
+    AVG(machine_cycle_time) AS avg_cycle_time,
+    MIN(timestamp) AS first_entry,
+    MAX(timestamp) AS last_entry
+FROM staging.forcam.cycle_time
+GROUP BY
+    machine_name,
+    FORMAT(timestamp, 'yyyy-MM');
+GO
+
+-- ================================
+-- View: Quarterly Summary
+-- ================================
+CREATE OR ALTER VIEW forcam.vw_quarterly_summary AS
+SELECT
+    machine_name,
+    DATEPART(YEAR, timestamp) AS year,
+    DATEPART(QUARTER, timestamp) AS quarter,
+    COUNT(*) AS total_cycles,
+    AVG(machine_cycle_time) AS avg_cycle_time,
+    MIN(timestamp) AS first_entry,
+    MAX(timestamp) AS last_entry
+FROM staging.forcam.cycle_time
+GROUP BY
+    machine_name,
+    DATEPART(YEAR, timestamp),
+    DATEPART(QUARTER, timestamp);
+GO
