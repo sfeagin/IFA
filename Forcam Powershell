@@ -3,3 +3,57 @@ Install-Module SQlServer
 Invoke-Sqlcmd -ServerInstance "your_server" `
               -Database "staging" `
               -InputFile "path\to\your_import_script.sql"
+# ================================
+# PowerShell Script: import-forecam-csv.ps1
+# ================================
+# This script loops through all Forecam machine folders, finds yesterday’s CSV files,
+# and runs the SQL import script using sqlcmd.
+# Make sure to run this AFTER the schema is deployed.
+
+# CONFIGURATION
+$RootPath = "\\SUSA059A59\Output_Prod"           # Root folder with machine directories
+$SqlScript = "C:\Scripts\import_cycle_time.sql"  # SQL import script (your BULK INSERT + INSERT logic)
+$SqlServer = "YourSqlServerName"                 # SQL Server name
+$Database = "staging"                            # Target database name
+
+# Get machine folders
+$folders = Get-ChildItem -Path $RootPath -Directory
+
+# Get yesterday's date in yyyyMMdd format
+$yesterday = Get-Date (Get-Date).AddDays(-1) -Format "yyyyMMdd"
+
+foreach ($folder in $folders) {
+    $MachineName = $folder.Name
+    $MachinePath = Join-Path $RootPath $MachineName
+
+    # Ensure Backup and Error folders exist
+    $BackupPath = Join-Path $MachinePath "Backup"
+    $ErrorPath = Join-Path $MachinePath "Error"
+    New-Item -Path $BackupPath -ItemType Directory -Force | Out-Null
+    New-Item -Path $ErrorPath -ItemType Directory -Force | Out-Null
+
+    # Get all CSV files from yesterday
+    $csvFiles = Get-ChildItem -Path $MachinePath -Filter "$yesterday*.csv" -File
+
+    foreach ($file in $csvFiles) {
+        $FilePath = $file.FullName
+
+        Write-Host "Importing file: $FilePath for machine: $MachineName"
+
+        # Run the SQL import using sqlcmd and pass variables
+        & sqlcmd -S $SqlServer -d $Database -i $SqlScript `
+            -v FilePath="'$FilePath'" `
+            -v MachineName="'$MachineName'" `
+            -b
+
+        if ($LASTEXITCODE -eq 0) {
+            # Move imported file to Backup
+            Move-Item -Path $FilePath -Destination $BackupPath
+            Write-Host "Imported and moved to Backup: $FilePath"
+        } else {
+            # Move file to Error folder
+            Move-Item -Path $FilePath -Destination $ErrorPath
+            Write-Warning "Failed to import: $FilePath. Moved to Error folder."
+        }
+    }
+}
