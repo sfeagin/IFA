@@ -107,4 +107,55 @@ SELECT
 FROM staging.forcam.cycle_time
 WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
 GO
+-- Step 1: (Optional) Drop existing thresholds table if you are redeploying
+IF OBJECT_ID('staging.forcam.thresholds') IS NOT NULL
+    DROP TABLE staging.forcam.thresholds;
+GO
 
+-- Step 2: Create thresholds table
+CREATE TABLE staging.forcam.thresholds (
+    machine_name NVARCHAR(100),
+    materialnumber NVARCHAR(50),
+    min_cycle_time FLOAT,
+    max_cycle_time FLOAT,
+    PRIMARY KEY (machine_name, materialnumber)
+);
+GO
+CREATE OR ALTER VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN t.min_cycle_time IS NULL THEN 'NO_THRESHOLD'
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+LEFT JOIN 
+    staging.sap_thresholds t
+    ON f.machine_name = t.machine_name
+    AND f.materialnumber = t.materialnumber;
+GO
+
+-- Step 4: Create or update view with dynamic thresholds
+CREATE OR ALTER VIEW staging.forcam.cycle_time_with_status AS
+SELECT 
+    f.*, 
+    t.min_cycle_time,
+    t.max_cycle_time,
+    CASE 
+        WHEN t.min_cycle_time IS NULL OR t.max_cycle_time IS NULL THEN 'NO_THRESHOLD'
+        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
+        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
+        ELSE 'OK'
+    END AS cycle_time_status
+FROM 
+    staging.forcam.cycle_time f
+LEFT JOIN 
+    staging.forcam.thresholds t
+    ON f.machine_name = t.machine_name
+   AND f.materialnumber = t.materialnumber;
+GO
