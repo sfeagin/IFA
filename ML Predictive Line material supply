@@ -1,0 +1,102 @@
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sklearn.ensemble import GradientBoostingRegressor, IsolationForest, RandomForestClassifier
+from sklearn.model_selection import train_test_split
+import joblib
+import pyodbc
+
+# ------------------- DB CONNECTIONS -------------------
+
+# 1. Forecam (MySQL)
+forecam_engine = create_engine('mysql+pymysql://user:pass@forecam_host/forcam')
+
+# 2. SAP (ODBC)
+sap_conn = pyodbc.connect('DSN=SAP_DB;UID=your_user;PWD=your_password')
+
+# 3. EMAIT (CSV / Excel or MSSQL)
+emait_df = pd.read_csv('/path/to/emait_updates.csv')  # or Excel/SQL if needed
+
+# ------------------- LOAD DATA -------------------
+
+# Forecam: Machine cycles
+forecam_df = pd.read_sql("""
+    SELECT timestamp, machine_id, product_id, cycle_time, production_count
+    FROM cycle_log
+    WHERE timestamp >= NOW() - INTERVAL 7 DAY
+""", con=forecam_engine)
+
+# SAP: Inventory logs
+sap_df = pd.read_sql("""
+    SELECT timestamp, material_id, inventory_level, consumption, location
+    FROM sap.inventory_log
+    WHERE location = 'LINE_SUPPLY' AND timestamp >= DATEADD(DAY, -7, GETDATE())
+""", con=sap_conn)
+
+# EMAIT already loaded from CSV
+
+# ------------------- MERGE & CLEAN -------------------
+
+# Convert to datetime
+forecam_df['timestamp'] = pd.to_datetime(forecam_df['timestamp'])
+sap_df['timestamp'] = pd.to_datetime(sap_df['timestamp'])
+emait_df['timestamp'] = pd.to_datetime(emait_df['timestamp'])
+
+# Join on timestamp & material/product ID level
+df = pd.merge_asof(sap_df.sort_values('timestamp'),
+                   forecam_df.sort_values('timestamp'),
+                   left_on='timestamp', right_on='timestamp',
+                   direction='nearest')
+
+df = pd.merge(df, emait_df, how='left',
+              on=['timestamp', 'material_id'])
+
+# Fill EMAIT corrections if present
+df['inventory_level'] = df['adjusted_count'].combine_first(df['inventory_level'])
+
+# ------------------- FEATURE ENGINEERING -------------------
+
+df['hour'] = df['timestamp'].dt.hour
+df['dayofweek'] = df['timestamp'].dt.dayofweek
+df = df.sort_values(['material_id', 'timestamp'])
+df['prev_consumption'] = df.groupby('material_id')['consumption'].shift(1)
+df['rolling_avg'] = df.groupby('material_id')['consumption'].transform(lambda x: x.rolling(3).mean())
+df.dropna(inplace=True)
+
+# ------------------- ML MODELS -------------------
+
+## 1. Forecast Material Consumption
+X = df[['hour', 'dayofweek', 'prev_consumption', 'rolling_avg', 'cycle_time', 'production_count']]
+y = df['consumption']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+forecast_model = GradientBoostingRegressor()
+forecast_model.fit(X_train, y_train)
+df['predicted_consumption'] = forecast_model.predict(X)
+joblib.dump(forecast_model, 'models/consumption_forecast.pkl')
+
+## 2. Replenishment Classification
+df['replenish_flag'] = (df['inventory_level'] - df['predicted_consumption'] < 50).astype(int)
+X_class = df[['inventory_level', 'predicted_consumption', 'production_count']]
+y_class = df['replenish_flag']
+
+class_model = RandomForestClassifier()
+class_model.fit(X_class, y_class)
+df['replenish_now'] = class_model.predict(X_class)
+joblib.dump(class_model, 'models/replenishment_classifier.pkl')
+
+## 3. Anomaly Detection
+anomaly_model = IsolationForest(contamination=0.03)
+df['anomaly'] = anomaly_model.fit_predict(df[['inventory_level', 'consumption']])
+df['anomaly_flag'] = df['anomaly'].apply(lambda x: 1 if x == -1 else 0)
+joblib.dump(anomaly_model, 'models/inventory_anomaly.pkl')
+
+# ------------------- EXPORT RESULTS -------------------
+
+results = df[['timestamp', 'material_id', 'machine_id', 'inventory_level',
+              'consumption', 'predicted_consumption', 'replenish_now', 'anomaly_flag']]
+
+# Write to centralized ML prediction table
+results.to_sql("ml_inventory_predictions", con=forecam_engine, if_exists='replace', index=False)
+
+print("✅ Multi-source ML predictions saved to `ml_inventory_predictions` table.")
