@@ -1,59 +1,97 @@
-# Example: Connect to SQL and run your script
-Install-Module SQlServer
-Invoke-Sqlcmd -ServerInstance "your_server" `
-              -Database "staging" `
-              -InputFile "path\to\your_import_script.sql"
 # ================================
-# PowerShell Script: import-forecam-csv.ps1
+# Combined PowerShell Script: import-forecam-csv-combined.ps1
 # ================================
-# This script loops through all Forecam machine folders, finds yesterday’s CSV files,
-# and runs the SQL import script using sqlcmd.
-# Make sure to run this AFTER the schema is deployed.
+# Features:
+# 1. Imports yesterday’s CSV files on startup
+# 2. Monitors for newly created files (real-time)
+# 3. Writes detailed logs
+# 4. Ensures all imported data is time-relevant
 
 # CONFIGURATION
-$RootPath = "\\SUSA059A59\Output_Prod"           # Root folder with machine directories
-$SqlScript = "C:\Scripts\import_cycle_time.sql"  # SQL import script (your BULK INSERT + INSERT logic)
-$SqlServer = "YourSqlServerName"                 # SQL Server name
-$Database = "staging"                            # Target database name
+$RootPath   = "\\SUSA059A59\Output_Prod"            # Root folder of machine directories
+$SqlScript  = "C:\Scripts\import_cycle_time.sql"    # SQL file that runs BULK INSERT logic
+$SqlServer  = "YourSqlServerName"                   # SQL Server name
+$Database   = "staging"                             # SQL Database
+$LogFile    = "C:\Logs\forecam_import.log"          # Log file path
 
-# Get machine folders
-$folders = Get-ChildItem -Path $RootPath -Directory
+# LOGGING FUNCTION
+function Log {
+    param([string]$message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LogFile -Value "$timestamp - $message"
+}
 
-# Get yesterday's date in yyyyMMdd format
-$yesterday = Get-Date (Get-Date).AddDays(-1) -Format "yyyyMMdd"
+# IMPORT FUNCTION
+function Import-CsvFile {
+    param(
+        [string]$FilePath,
+        [string]$MachineName
+    )
 
-foreach ($folder in $folders) {
-    $MachineName = $folder.Name
-    $MachinePath = Join-Path $RootPath $MachineName
+    try {
+        Log "Importing file: $FilePath for machine: $MachineName"
 
-    # Ensure Backup and Error folders exist
-    $BackupPath = Join-Path $MachinePath "Backup"
-    $ErrorPath = Join-Path $MachinePath "Error"
-    New-Item -Path $BackupPath -ItemType Directory -Force | Out-Null
-    New-Item -Path $ErrorPath -ItemType Directory -Force | Out-Null
-
-    # Get all CSV files from yesterday
-    $csvFiles = Get-ChildItem -Path $MachinePath -Filter "$yesterday*.csv" -File
-
-    foreach ($file in $csvFiles) {
-        $FilePath = $file.FullName
-
-        Write-Host "Importing file: $FilePath for machine: $MachineName"
-
-        # Run the SQL import using sqlcmd and pass variables
         & sqlcmd -S $SqlServer -d $Database -i $SqlScript `
             -v FilePath="'$FilePath'" `
             -v MachineName="'$MachineName'" `
             -b
 
         if ($LASTEXITCODE -eq 0) {
-            # Move imported file to Backup
+            $BackupPath = Join-Path (Split-Path $FilePath -Parent) "Backup"
+            New-Item -Path $BackupPath -ItemType Directory -Force | Out-Null
             Move-Item -Path $FilePath -Destination $BackupPath
-            Write-Host "Imported and moved to Backup: $FilePath"
+            Log "Successfully imported and moved to Backup: $FilePath"
         } else {
-            # Move file to Error folder
+            $ErrorPath = Join-Path (Split-Path $FilePath -Parent) "Error"
+            New-Item -Path $ErrorPath -ItemType Directory -Force | Out-Null
             Move-Item -Path $FilePath -Destination $ErrorPath
-            Write-Warning "Failed to import: $FilePath. Moved to Error folder."
+            Log "ERROR: Import failed. Moved to Error: $FilePath"
         }
+    } catch {
+        Log "EXCEPTION: $($_.Exception.Message)"
     }
 }
+
+# ================================
+# INITIAL YESTERDAY IMPORT
+# ================================
+$yesterday = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
+$folders = Get-ChildItem -Path $RootPath -Directory
+
+foreach ($folder in $folders) {
+    $MachineName = $folder.Name
+    $MachinePath = Join-Path $RootPath $MachineName
+    $csvFiles = Get-ChildItem -Path $MachinePath -Filter "$yesterday*.csv" -File
+
+    foreach ($file in $csvFiles) {
+        Import-CsvFile -FilePath $file.FullName -MachineName $MachineName
+    }
+}
+
+# ================================
+# FILE WATCHER: LIVE STREAM
+# ================================
+$watcher = New-Object System.IO.FileSystemWatcher
+$watcher.Path = $RootPath
+$watcher.IncludeSubdirectories = $true
+$watcher.Filter = "*.csv"
+$watcher.EnableRaisingEvents = $true
+
+Register-ObjectEvent $watcher "Created" -Action {
+    $file = $Event.SourceEventArgs.FullPath
+    $folder = Split-Path $file -Parent
+    $machineName = Split-Path $folder -Leaf
+
+    Start-Sleep -Seconds 5  # Let the file finish writing
+    $fileDate = ([System.IO.Path]::GetFileNameWithoutExtension($file)) -replace '[^\d]', ''
+    $today = (Get-Date).ToString("yyyyMMdd")
+
+    if ($fileDate -eq $today) {
+        Log "Live stream: New file detected for today: $file"
+        Import-CsvFile -FilePath $file -MachineName $machineName
+    } else {
+        Log "Live stream: File skipped (not from today): $file"
+    }
+}
+
+Log "Watcher active. Monitoring for real-time updates..."
