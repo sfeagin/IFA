@@ -1,0 +1,5 @@
+# Example: Connect to SQL and run your script
+Install-Module SQlServer
+Invoke-Sqlcmd -ServerInstance "your_server" `
+              -Database "staging" `
+              -InputFile "path\to\your_import_script.sql"
