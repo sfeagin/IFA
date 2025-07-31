@@ -1,0 +1,50 @@
+# List of SharePoint Excel files to download
+$dateien = @("Hdlp-Actual.xlsx","Shap-Actual.xlsx","Chsp-Actual.xlsx","Ujap-Actual.xlsx")
+
+# Load SharePoint client libraries
+Add-Type -Path 'C:\Program Files\Common Files\Microsoft Shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.dll' -ErrorAction Stop
+Add-Type -Path 'C:\Program Files\Common Files\Microsoft Shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.Runtime.dll' -ErrorAction Stop
+
+# Prompt for credentials
+$user = Read-Host "Enter SharePoint username"
+$pass = Read-Host -AsSecureString "Enter SharePoint password"
+
+# SharePoint site and file locations
+$targetSiteUrl = "https://ifacloud.sharepoint.com/sites/PowerBiGWXAX/"
+$spFileUrlBase = "https://ifacloud.sharepoint.com/sites/PowerBiGWXAX/Freigegebene%20Dokumente/Actual"
+$outputFilePathBase = "E:\data_warehouse\components\KPI_opex\sharepoint_data"
+
+# Set TLS protocol
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Set credentials
+$spCredential = New-Object Microsoft.SharePoint.Client.SharePointOnlineCredentials($user, $pass)
+$Context = New-Object Microsoft.SharePoint.Client.ClientContext($targetSiteUrl)
+$Context.Credentials = $spCredential
+
+try {
+    $Context.ExecuteQuery()
+} catch {
+    Write-Host "WARNING: executeQuery() failed, but proceeding..." -ForegroundColor Yellow
+}
+
+# Create authentication cookie
+$AuthenticationCookie = $Context.Credentials.GetAuthenticationCookie($targetSiteUrl, $true)
+$WebSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+$WebSession.Credentials = $Context.Credentials
+$WebSession.Cookies.SetCookies($targetSiteUrl, $AuthenticationCookie)
+$WebSession.Headers.Add("Accept", "application/json;odata=verbose")
+
+# Download each file
+foreach ($file in $dateien) {
+    $plant = $file.Substring(0, 4)
+    $spFileUrl = "$spFileUrlBase/$plant/$file"
+    $outputFilePath = Join-Path $outputFilePathBase $file
+
+    try {
+        Invoke-WebRequest -Uri $spFileUrl -OutFile $outputFilePath -WebSession $WebSession -ErrorAction Stop
+        Write-Host "Downloaded $file to $outputFilePath" -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to download $file from $spFileUrl" -ForegroundColor Red
+    }
+}
