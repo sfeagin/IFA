@@ -1,53 +1,52 @@
--- ===============================
--- Create Required Schemas
--- ===============================
-IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'forcam')
-    EXEC('CREATE SCHEMA forcam');
-GO
+-- ============================================================
+-- Script:     FORCAM  Setup
+-- Author:     Shannon Feagin 
+-- Version:    v1.0
+-- Date:       2025-08-01
+-- Target DB:  SQL Server 2022 or later
+-- Purpose:    Logic to forcam data scrape pre-table (SQL)
+-- ============================================================
 
--- ===============================
--- Drop and Recreate cycle_time Table
--- Stores raw cycle time and machine data from FORCAM
--- ===============================
+-- Drop and recreate cycle_time table
 IF OBJECT_ID('staging.forcam.cycle_time') IS NOT NULL
     DROP TABLE staging.forcam.cycle_time;
 GO
 
+USE staging;
+GO
+
 CREATE TABLE staging.forcam.cycle_time (
-    id INT IDENTITY(1,1) PRIMARY KEY,
-    machine_name NVARCHAR(100),
-    [date] DATE,
-    [time] TIME(0),
-    workplace NVARCHAR(50),
-    ordernumber NVARCHAR(50),
-    operationnumber NVARCHAR(50),
-    materialnumber NVARCHAR(50),
-    te_sap FLOAT,
-    yield FLOAT,
-    Scrap FLOAT,
-    Rework FLOAT,
-    undefinedstoppage FLOAT,
-    refillingoperationalmaterials FLOAT,
-    machinewaitingonmaterial FLOAT,
-    shiftchangeover FLOAT,
-    preparation_time FLOAT,
-    machine_cycle_time FLOAT,
-    button_to_button_time FLOAT,
-    stroke_factor FLOAT,
-    cure_period FLOAT,
-    cure_period_factor FLOAT,
-    dstcalc FLOAT,
-    state NVARCHAR(50),
-    status_reason NVARCHAR(50),
-    plangroup NVARCHAR(50),
-    plangroup_counter NVARCHAR(50),
-    script_version NVARCHAR(50),
-
-    -- Auto-generated UUID for tracking
-    uuid AS CONCAT(workplace, '-', REPLACE(materialnumber, '-', ''), '-', operationnumber, '-', plangroup, '-', plangroup_counter) PERSISTED,
-
-    -- Static cycle time quality indicator
-    cycle_time_status AS (
+   id INT IDENTITY(1,1) PRIMARY KEY, 
+   machine_name NVARCHAR(100) NOT NULL,
+   [date] DATE NOT NULL,
+   [time] TIME(0) NOT NULL,
+   workplace NVARCHAR(50),
+   ordernumber NVARCHAR(50),
+   operationnumber NVARCHAR(50),
+   materialnumber NVARCHAR(50),
+   te_sap FLOAT,
+   yield FLOAT,
+   Scrap FLOAT,
+   Rework FLOAT,
+   undefinedstoppage FLOAT,
+   refillingoperationalmaterials FLOAT,
+   machinewaitingonmaterial FLOAT,
+   shiftchangeover FLOAT,
+   preparation_time FLOAT,
+   machine_cycle_time FLOAT,
+   button_to_button_time FLOAT,
+   stroke_factor FLOAT,
+   cure_period FLOAT,
+   cure_period_factor FLOAT,
+   dstcalc FLOAT,
+   state NVARCHAR(50),
+   status_reason NVARCHAR(50),
+   plangroup NVARCHAR(50),
+   plangroup_counter NVARCHAR(50),
+   script_version NVARCHAR(50),
+   counter_total NVARCHAR(50),
+   uuid AS CONCAT(workplace, '-', REPLACE(materialnumber, '-', ''), '-', operationnumber, '-', plangroup, '-', plangroup_counter) PERSISTED,
+   cycle_time_status AS (
         CASE 
             WHEN machine_cycle_time < 5 THEN 'TOO_SHORT'
             WHEN machine_cycle_time > 600 THEN 'TOO_LONG'
@@ -57,28 +56,27 @@ CREATE TABLE staging.forcam.cycle_time (
 );
 GO
 
--- ===============================
--- Drop and Recreate thresholds Table
--- Stores per-machine and material threshold limits for cycle time validation
--- ===============================
+-- Drop and recreate thresholds table
 IF OBJECT_ID('staging.forcam.thresholds') IS NOT NULL
     DROP TABLE staging.forcam.thresholds;
 GO
 
 CREATE TABLE staging.forcam.thresholds (
-    machine_name NVARCHAR(100),
-    materialnumber NVARCHAR(50),
+    machine_name NVARCHAR(100) NOT NULL,
+    materialnumber NVARCHAR(50) NOT NULL,
     min_cycle_time FLOAT,
     max_cycle_time FLOAT,
-    PRIMARY KEY (machine_name, materialnumber)
+    CONSTRAINT PK_thresholds PRIMARY KEY (machine_name, materialnumber),
+    CONSTRAINT CK_thresholds_min_less_max CHECK (min_cycle_time < max_cycle_time)
 );
 GO
 
--- ===============================
--- Create or Replace View: cycle_time_with_status
--- Adds dynamic threshold-based status to each cycle
--- ===============================
-CREATE OR ALTER VIEW staging.forcam.cycle_time_with_status AS
+-- Drop and recreate cycle_time_with_status view
+IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+    DROP VIEW staging.forcam.cycle_time_with_status;
+GO
+
+CREATE VIEW staging.forcam.cycle_time_with_status AS
 SELECT 
     f.*, 
     t.min_cycle_time,
@@ -94,13 +92,29 @@ FROM
 LEFT JOIN 
     staging.forcam.thresholds t
     ON f.machine_name = t.machine_name
-    AND f.materialnumber = t.materialnumber;
+   AND f.materialnumber = t.materialnumber;
 GO
 
--- ===============================
--- Mode Calculation: Machine Cycle Time
--- Gets the most frequent machine_cycle_time value for given UUID and order
--- ===============================
+-- Indexes for performance optimization
+-- Index on uuid for faster searches
+CREATE NONCLUSTERED INDEX IX_cycle_time_uuid 
+    ON staging.forcam.cycle_time(uuid);
+GO
+
+-- Index on machine_name for faster joins and filtering
+CREATE NONCLUSTERED INDEX IX_cycle_time_machine_name 
+    ON staging.forcam.cycle_time(machine_name);
+GO
+
+-- Index on materialnumber for faster joins and filtering
+CREATE NONCLUSTERED INDEX IX_cycle_time_materialnumber 
+    ON staging.forcam.cycle_time(materialnumber);
+GO
+
+-- Example Mode calculation queries (can be wrapped in procedures/functions)
+-- These queries are optimized and use the indexed columns where appropriate
+
+-- Mode for machine_cycle_time example
 SELECT TOP 1 WITH TIES machine_cycle_time AS mode_machine_cycle_time
 FROM staging.forcam.cycle_time
 WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
@@ -108,10 +122,7 @@ GROUP BY machine_cycle_time
 ORDER BY COUNT(*) DESC;
 GO
 
--- ===============================
--- Mode Calculation: Preparation Time
--- Gets the most frequent preparation_time value for given UUID and order
--- ===============================
+-- Mode for preparation_time example
 SELECT TOP 1 WITH TIES preparation_time AS mode_preparation_time
 FROM staging.forcam.cycle_time
 WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
@@ -119,11 +130,7 @@ GROUP BY preparation_time
 ORDER BY COUNT(*) DESC;
 GO
 
--- ===============================
--- IQR Calculation: Machine Cycle Time
--- Calculates Interquartile Range to detect outliers
--- Requires SQL Server 2022+ for PERCENTILE_CONT
--- ===============================
+-- Interquartile Range (IQR) calculations for machine_cycle_time and preparation_time (SQL Server 2019+)
 SELECT
     PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY machine_cycle_time) -
     PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY machine_cycle_time) AS machine_cycle_time_iqr
@@ -131,12 +138,18 @@ FROM staging.forcam.cycle_time
 WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER';
 GO
 
--- ===============================
--- IQR Calculation: Preparation Time
--- ===============================
 SELECT
     PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY preparation_time) -
     PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY preparation_time) AS preparation_time_iqr
 FROM staging.forcam.cycle_time
 WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER';
 GO
+
+    -- Basic status logic (static thresholds; replaced by dynamic view)
+    cycle_time_status AS (
+        CASE 
+            WHEN machine_cycle_time < 5 THEN 'TOO_SHORT'
+            WHEN machine_cycle_time > 600 THEN 'TOO_LONG'
+            ELSE 'Good'
+        END
+    ) PERSISTED,
