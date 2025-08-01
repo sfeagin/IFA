@@ -141,7 +141,7 @@ BEGIN
         id INT IDENTITY(1,1) PRIMARY KEY,
         machine_name NVARCHAR(100),
         material_number NVARCHAR(100),
-        cycle_time FLOAT,
+        cycle_time DECIMAL,
         operation_number NVARCHAR(100),
         timestamp DATETIME,
         json_blob NVARCHAR(MAX)
