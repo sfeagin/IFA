@@ -85,13 +85,6 @@ function Import-ApiData {
                     $connection.Open()
 
                     foreach ($item in $response.items) {
-                        $machine = $item.machineName
-                        $material = $item.materialNumber
-                        $cycle = $item.cycleTime
-                        $operation = $item.operationNumber
-                        $timestamp = Get-Date $item.timestamp -Format "yyyy-MM-dd HH:mm:ss"
-                        $jsonBlob = $item | ConvertTo-Json -Depth 10
-
                         $cmd = $connection.CreateCommand()
                         $cmd.CommandText = @"
 INSERT INTO staging.forcam.api_cycle_data
@@ -99,17 +92,19 @@ INSERT INTO staging.forcam.api_cycle_data
 VALUES (@machine, @material, @cycle, @operation, @timestamp, @json)
 "@
 
-                        $cmd.Parameters.Add("@machine",   [System.Data.SqlDbType]::NVarChar, 100).Value = $machine
-                        $cmd.Parameters.Add("@material",  [System.Data.SqlDbType]::NVarChar, 100).Value = $material
-                        $cmd.Parameters.Add("@cycle",     [System.Data.SqlDbType]::Float).Value = $cycle
-                        $cmd.Parameters.Add("@operation", [System.Data.SqlDbType]::NVarChar, 100).Value = $operation
-                        $cmd.Parameters.Add("@timestamp", [System.Data.SqlDbType]::DateTime).Value = $timestamp
-                        $cmd.Parameters.Add("@json",      [System.Data.SqlDbType]::NVarChar, -1).Value = $jsonBlob
+                        $cmd.Parameters.Add("@machine",   [System.Data.SqlDbType]::NVarChar, 100).Value = $item.machineName
+                        $cmd.Parameters.Add("@material",  [System.Data.SqlDbType]::NVarChar, 50).Value = $item.materialNumber
+                        $cmd.Parameters.Add("@cycle",     [System.Data.SqlDbType]::Decimal).Value = [decimal]$item.cycleTime
+                        $cmd.Parameters.Add("@operation", [System.Data.SqlDbType]::NVarChar, 50).Value = $item.operationNumber
+                        $cmd.Parameters.Add("@timestamp", [System.Data.SqlDbType]::DateTime).Value = [datetime]$item.timestamp
+                        $cmd.Parameters.Add("@json",      [System.Data.SqlDbType]::NVarChar, -1).Value = $item | ConvertTo-Json -Depth 10
 
                         $cmd.ExecuteNonQuery()
+                        $cmd.Dispose()
                     }
 
                     $connection.Close()
+                    $connection.Dispose()
                     Write-Log "Flattened JSON page $page from $endpoint inserted into SQL"
                     $page++
                 } else {
