@@ -176,6 +176,54 @@ LEFT JOIN
    AND ct.material_number = t.material_number;
 GO
 
+/* ===========================
+   CSV and JSON String Escape Functions
+   =========================== */
+
+CREATE OR ALTER FUNCTION staging.forcam.fn_EscapeForCsv(@input NVARCHAR(MAX))
+RETURNS NVARCHAR(MAX)
+AS
+BEGIN
+    -- Escapes quotes by doubling, and wraps string in quotes if it contains comma, quote, or newline
+    IF @input IS NULL RETURN NULL;
+    
+    DECLARE @escaped NVARCHAR(MAX) = REPLACE(@input, '"', '""');
+    
+    IF CHARINDEX(',', @escaped) > 0 OR CHARINDEX('"', @escaped) > 0 OR CHARINDEX(CHAR(10), @escaped) > 0 OR CHARINDEX(CHAR(13), @escaped) > 0
+        SET @escaped = '"' + @escaped + '"';
+    
+    RETURN @escaped;
+END;
+GO
+
+CREATE OR ALTER FUNCTION staging.forcam.fn_JsonEscapeString(@input NVARCHAR(MAX))
+RETURNS NVARCHAR(MAX)
+AS
+BEGIN
+    -- Escapes backslash, double quote, and control characters for JSON strings
+    IF @input IS NULL RETURN NULL;
+    
+    DECLARE @output NVARCHAR(MAX) = @input;
+    SET @output = REPLACE(@output, '\', '\\');
+    SET @output = REPLACE(@output, '"', '\"');
+    SET @output = REPLACE(@output, CHAR(8), '\b');
+    SET @output = REPLACE(@output, CHAR(9), '\t');
+    SET @output = REPLACE(@output, CHAR(10), '\n');
+    SET @output = REPLACE(@output, CHAR(12), '\f');
+    SET @output = REPLACE(@output, CHAR(13), '\r');
+    
+    RETURN @output;
+END;
+GO
+
+/* ===========================
+   Notes:
+   - Use fn_EscapeForCsv() to prepare strings for safe CSV export.
+   - Use fn_JsonEscapeString() to escape strings before JSON output.
+   - All numeric fields have non-negative CHECK constraints.
+   - Error logging captures all table/view creation errors.
+   - Indexes improve performance on common filters and joins.
+   - cycle_time_status is computed via a scalar function for maintainability.
 -- ===========================
 -- Notes:
 -- 1. All columns use snake_case for consistency.
