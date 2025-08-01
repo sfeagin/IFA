@@ -7,149 +7,182 @@
 -- Purpose:    Logic to forcam data scrape pre-table (SQL)
 -- ============================================================
 
--- Drop and recreate cycle_time table
-IF OBJECT_ID('staging.forcam.cycle_time') IS NOT NULL
-    DROP TABLE staging.forcam.cycle_time;
+===========
+-- Error Logging Table (First!)
+-- ===========================
+IF OBJECT_ID('staging.forcam.error_log', 'U') IS NULL
+BEGIN
+    CREATE TABLE staging.forcam.error_log (
+        error_id INT IDENTITY(1,1) PRIMARY KEY,
+        error_message NVARCHAR(MAX),
+        error_date DATETIME DEFAULT GETDATE()
+    );
+END
+GO
+
+-- ===========================
+-- Schema & Table Management
+-- ===========================
+
+BEGIN TRY
+    IF OBJECT_ID('staging.forcam.cycle_time', 'U') IS NOT NULL
+        DROP TABLE staging.forcam.cycle_time;
+END TRY
+BEGIN CATCH
+    INSERT INTO staging.forcam.error_log(error_message, error_date)
+    VALUES (ERROR_MESSAGE(), GETDATE());
+END CATCH;
 GO
 
 USE staging;
 GO
 
-CREATE TABLE staging.forcam.cycle_time (
-   id INT IDENTITY(1,1) PRIMARY KEY, 
-   machine_name NVARCHAR(100) NOT NULL,
-   [date] DATE NOT NULL,
-   [time] TIME(0) NOT NULL,
-   workplace NVARCHAR(50),
-   ordernumber NVARCHAR(50),
-   operationnumber NVARCHAR(50),
-   materialnumber NVARCHAR(50),
-   te_sap FLOAT,
-   yield FLOAT,
-   Scrap FLOAT,
-   Rework FLOAT,
-   undefinedstoppage FLOAT,
-   refillingoperationalmaterials FLOAT,
-   machinewaitingonmaterial FLOAT,
-   shiftchangeover FLOAT,
-   preparation_time FLOAT,
-   machine_cycle_time FLOAT,
-   button_to_button_time FLOAT,
-   stroke_factor FLOAT,
-   cure_period FLOAT,
-   cure_period_factor FLOAT,
-   dstcalc FLOAT,
-   state NVARCHAR(50),
-   status_reason NVARCHAR(50),
-   plangroup NVARCHAR(50),
-   plangroup_counter NVARCHAR(50),
-   script_version NVARCHAR(50),
-   counter_total NVARCHAR(50),
-   uuid AS CONCAT(workplace, '-', REPLACE(materialnumber, '-', ''), '-', operationnumber, '-', plangroup, '-', plangroup_counter) PERSISTED,
-   cycle_time_status AS (
-        CASE 
-            WHEN machine_cycle_time < 5 THEN 'TOO_SHORT'
-            WHEN machine_cycle_time > 600 THEN 'TOO_LONG'
-            ELSE 'Good'
-        END
-    ) PERSISTED
-);
+BEGIN TRY
+    CREATE TABLE staging.forcam.cycle_time (
+       id INT IDENTITY(1,1) PRIMARY KEY, 
+       machine_name NVARCHAR(100) NOT NULL,
+       [date] DATE NOT NULL,
+       [time] TIME(0) NOT NULL,
+       workplace NVARCHAR(50),
+       order_number NVARCHAR(50),
+       operation_number NVARCHAR(50),
+       material_number NVARCHAR(50),
+       te_sap DECIMAL(10,4) CHECK (te_sap >= 0),
+       yield DECIMAL(10,4) CHECK (yield >= 0),
+       scrap DECIMAL(10,4) CHECK (scrap >= 0),
+       rework DECIMAL(10,4) CHECK (rework >= 0),
+       undefined_stoppage DECIMAL(10,4) CHECK (undefined_stoppage >= 0),
+       refilling_operational_materials DECIMAL(10,4) CHECK (refilling_operational_materials >= 0),
+       machine_waiting_on_material DECIMAL(10,4) CHECK (machine_waiting_on_material >= 0),
+       shift_changeover DECIMAL(10,4) CHECK (shift_changeover >= 0),
+       preparation_time DECIMAL(10,4) CHECK (preparation_time >= 0),
+       machine_cycle_time DECIMAL(10,4) CHECK (machine_cycle_time >= 0),
+       button_to_button_time DECIMAL(10,4) CHECK (button_to_button_time >= 0),
+       stroke_factor DECIMAL(10,4) CHECK (stroke_factor >= 0),
+       cure_period DECIMAL(10,4) CHECK (cure_period >= 0),
+       cure_period_factor DECIMAL(10,4) CHECK (cure_period_factor >= 0),
+       dst_calc DECIMAL(10,4) CHECK (dst_calc >= 0),
+       state NVARCHAR(50),
+       status_reason NVARCHAR(50),
+       plan_group NVARCHAR(50),
+       plan_group_counter NVARCHAR(50),
+       script_version NVARCHAR(50),
+       counter_total NVARCHAR(50),
+       uuid AS CONCAT(workplace, '-', REPLACE(material_number, '-', ''), '-', operation_number, '-', plan_group, '-', plan_group_counter) PERSISTED,
+       CONSTRAINT UQ_cycle_time_uuid UNIQUE (uuid)
+    );
+END TRY
+BEGIN CATCH
+    INSERT INTO staging.forcam.error_log(error_message, error_date)
+    VALUES (ERROR_MESSAGE(), GETDATE());
+END CATCH;
 GO
 
--- Drop and recreate thresholds table
-IF OBJECT_ID('staging.forcam.thresholds') IS NOT NULL
-    DROP TABLE staging.forcam.thresholds;
+BEGIN TRY
+    IF OBJECT_ID('staging.forcam.thresholds', 'U') IS NOT NULL
+        DROP TABLE staging.forcam.thresholds;
+END TRY
+BEGIN CATCH
+    INSERT INTO staging.forcam.error_log(error_message, error_date)
+    VALUES (ERROR_MESSAGE(), GETDATE());
+END CATCH;
 GO
 
-CREATE TABLE staging.forcam.thresholds (
-    machine_name NVARCHAR(100) NOT NULL,
-    materialnumber NVARCHAR(50) NOT NULL,
-    min_cycle_time FLOAT,
-    max_cycle_time FLOAT,
-    CONSTRAINT PK_thresholds PRIMARY KEY (machine_name, materialnumber),
-    CONSTRAINT CK_thresholds_min_less_max CHECK (min_cycle_time < max_cycle_time)
-);
+BEGIN TRY
+    CREATE TABLE staging.forcam.thresholds (
+        machine_name NVARCHAR(100) NOT NULL,
+        material_number NVARCHAR(50) NOT NULL,
+        min_cycle_time DECIMAL(10,4) CHECK (min_cycle_time >= 0),
+        max_cycle_time DECIMAL(10,4) CHECK (max_cycle_time >= 0),
+        CONSTRAINT PK_thresholds PRIMARY KEY (machine_name, material_number),
+        CONSTRAINT CK_thresholds_min_less_max CHECK (min_cycle_time < max_cycle_time)
+    );
+END TRY
+BEGIN CATCH
+    INSERT INTO staging.forcam.error_log(error_message, error_date)
+    VALUES (ERROR_MESSAGE(), GETDATE());
+END CATCH;
 GO
 
--- Drop and recreate cycle_time_with_status view
-IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
-    DROP VIEW staging.forcam.cycle_time_with_status;
+-- ===========================
+-- Indexes to optimize queries
+-- ===========================
+
+CREATE NONCLUSTERED INDEX IX_thresholds_machine_material
+    ON staging.forcam.thresholds (machine_name, material_number);
+GO
+
+CREATE NONCLUSTERED INDEX IX_cycle_time_uuid
+    ON staging.forcam.cycle_time(uuid);
+GO
+
+CREATE NONCLUSTERED INDEX IX_cycle_time_machine_material
+    ON staging.forcam.cycle_time(machine_name, material_number);
+GO
+
+-- Example filtered index for frequent status queries
+CREATE NONCLUSTERED INDEX IX_cycle_time_status_long
+    ON staging.forcam.cycle_time(machine_cycle_time)
+    WHERE machine_cycle_time > 600;
+GO
+
+-- ===========================
+-- Scalar Function for Cycle Time Status
+-- ===========================
+
+CREATE OR ALTER FUNCTION staging.forcam.fn_getCycleTimeStatus(
+    @cycleTime DECIMAL(10,4),
+    @minCycleTime DECIMAL(10,4),
+    @maxCycleTime DECIMAL(10,4)
+)
+RETURNS NVARCHAR(50)
+AS
+BEGIN
+    IF @minCycleTime IS NULL OR @maxCycleTime IS NULL
+        RETURN 'NO_THRESHOLD';
+    IF @cycleTime < @minCycleTime
+        RETURN 'TOO_SHORT';
+    IF @cycleTime > @maxCycleTime
+        RETURN 'TOO_LONG';
+    RETURN 'OK';
+END;
+GO
+
+-- ===========================
+-- Optimized View Using Scalar Function
+-- ===========================
+
+BEGIN TRY
+    IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
+        DROP VIEW staging.forcam.cycle_time_with_status;
+END TRY
+BEGIN CATCH
+    INSERT INTO staging.forcam.error_log(error_message, error_date)
+    VALUES (ERROR_MESSAGE(), GETDATE());
+END CATCH;
 GO
 
 CREATE VIEW staging.forcam.cycle_time_with_status AS
 SELECT 
-    f.*, 
+    ct.*,
     t.min_cycle_time,
     t.max_cycle_time,
-    CASE 
-        WHEN t.min_cycle_time IS NULL OR t.max_cycle_time IS NULL THEN 'NO_THRESHOLD'
-        WHEN f.machine_cycle_time < t.min_cycle_time THEN 'TOO_SHORT'
-        WHEN f.machine_cycle_time > t.max_cycle_time THEN 'TOO_LONG'
-        ELSE 'OK'
-    END AS cycle_time_status
+    staging.forcam.fn_getCycleTimeStatus(ct.machine_cycle_time, t.min_cycle_time, t.max_cycle_time) AS cycle_time_status
 FROM 
-    staging.forcam.cycle_time f
+    staging.forcam.cycle_time ct
 LEFT JOIN 
     staging.forcam.thresholds t
-    ON f.machine_name = t.machine_name
-   AND f.materialnumber = t.materialnumber;
+    ON ct.machine_name = t.machine_name
+   AND ct.material_number = t.material_number;
 GO
 
--- Indexes for performance optimization
--- Index on uuid for faster searches
-CREATE NONCLUSTERED INDEX IX_cycle_time_uuid 
-    ON staging.forcam.cycle_time(uuid);
-GO
-
--- Index on machine_name for faster joins and filtering
-CREATE NONCLUSTERED INDEX IX_cycle_time_machine_name 
-    ON staging.forcam.cycle_time(machine_name);
-GO
-
--- Index on materialnumber for faster joins and filtering
-CREATE NONCLUSTERED INDEX IX_cycle_time_materialnumber 
-    ON staging.forcam.cycle_time(materialnumber);
-GO
-
--- Example Mode calculation queries (can be wrapped in procedures/functions)
--- These queries are optimized and use the indexed columns where appropriate
-
--- Mode for machine_cycle_time example
-SELECT TOP 1 WITH TIES machine_cycle_time AS mode_machine_cycle_time
-FROM staging.forcam.cycle_time
-WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
-GROUP BY machine_cycle_time
-ORDER BY COUNT(*) DESC;
-GO
-
--- Mode for preparation_time example
-SELECT TOP 1 WITH TIES preparation_time AS mode_preparation_time
-FROM staging.forcam.cycle_time
-WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER'
-GROUP BY preparation_time
-ORDER BY COUNT(*) DESC;
-GO
-
--- Interquartile Range (IQR) calculations for machine_cycle_time and preparation_time (SQL Server 2019+)
-SELECT
-    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY machine_cycle_time) -
-    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY machine_cycle_time) AS machine_cycle_time_iqr
-FROM staging.forcam.cycle_time
-WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER';
-GO
-
-SELECT
-    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY preparation_time) -
-    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY preparation_time) AS preparation_time_iqr
-FROM staging.forcam.cycle_time
-WHERE uuid = 'SOME_UUID' AND ordernumber = 'SOME_ORDERNUMBER';
-GO
-
-    -- Basic status logic (static thresholds; replaced by dynamic view)
-    cycle_time_status AS (
-        CASE 
-            WHEN machine_cycle_time < 5 THEN 'TOO_SHORT'
-            WHEN machine_cycle_time > 600 THEN 'TOO_LONG'
-            ELSE 'Good'
-        END
-    ) PERSISTED,
+-- ===========================
+-- Notes:
+-- 1. All columns use snake_case for consistency.
+-- 2. Decimal used for precision on numeric fields.
+-- 3. TRY/CATCH blocks log errors into error_log table, which is always available.
+-- 4. Composite indexes and a filtered index added for efficient queries.
+-- 5. All time/numeric fields have non-negative constraints.
+-- 6. cycle_time_status logic centralized in scalar function for maintainability.
+-- 7. Use script_version to track schema changes manually.
+-- ===========================
