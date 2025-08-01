@@ -7,7 +7,18 @@
 -- Purpose:    Logic to forcam data scrape pre-table (SQL)
 -- ============================================================
 
-===========
+-- Ensure session settings for schema binding, etc.
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+
+-- Create schema if it does not exist
+IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'forcam')
+BEGIN
+    EXEC('CREATE SCHEMA forcam');
+END
+
+GO
 -- Error Logging Table (First!)
 -- ===========================
 IF OBJECT_ID('staging.forcam.error_log', 'U') IS NULL
@@ -15,7 +26,10 @@ BEGIN
     CREATE TABLE staging.forcam.error_log (
         error_id INT IDENTITY(1,1) PRIMARY KEY,
         error_message NVARCHAR(MAX),
-        error_date DATETIME DEFAULT GETDATE()
+        error_date DATETIME DEFAULT GETDATE(),
+        -- Suggestion 2: Add error_severity and error_line
+        error_severity NVARCHAR(50),
+        error_line INT
     );
 END
 GO
@@ -29,8 +43,9 @@ BEGIN TRY
         DROP TABLE staging.forcam.cycle_time;
 END TRY
 BEGIN CATCH
-    INSERT INTO staging.forcam.error_log(error_message, error_date)
-    VALUES (ERROR_MESSAGE(), GETDATE());
+    -- Suggestion 2: Log error severity and line
+    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
+    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
 END CATCH;
 GO
 
@@ -62,8 +77,9 @@ BEGIN TRY
        cure_period DECIMAL(10,4) CHECK (cure_period >= 0),
        cure_period_factor DECIMAL(10,4) CHECK (cure_period_factor >= 0),
        dst_calc DECIMAL(10,4) CHECK (dst_calc >= 0),
-       state NVARCHAR(50),
-       status_reason NVARCHAR(50),
+       -- Suggestion 3: Add NOT NULL and DEFAULT constraints for state and status_reason
+       state NVARCHAR(50) NOT NULL CONSTRAINT DF_cycle_time_state DEFAULT 'UNKNOWN',
+       status_reason NVARCHAR(50) NOT NULL CONSTRAINT DF_cycle_time_status_reason DEFAULT 'NONE',
        plan_group NVARCHAR(50),
        plan_group_counter NVARCHAR(50),
        script_version NVARCHAR(50),
@@ -73,8 +89,8 @@ BEGIN TRY
     );
 END TRY
 BEGIN CATCH
-    INSERT INTO staging.forcam.error_log(error_message, error_date)
-    VALUES (ERROR_MESSAGE(), GETDATE());
+    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
+    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
 END CATCH;
 GO
 
@@ -83,8 +99,8 @@ BEGIN TRY
         DROP TABLE staging.forcam.thresholds;
 END TRY
 BEGIN CATCH
-    INSERT INTO staging.forcam.error_log(error_message, error_date)
-    VALUES (ERROR_MESSAGE(), GETDATE());
+    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
+    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
 END CATCH;
 GO
 
@@ -99,8 +115,8 @@ BEGIN TRY
     );
 END TRY
 BEGIN CATCH
-    INSERT INTO staging.forcam.error_log(error_message, error_date)
-    VALUES (ERROR_MESSAGE(), GETDATE());
+    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
+    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
 END CATCH;
 GO
 
@@ -126,39 +142,45 @@ CREATE NONCLUSTERED INDEX IX_cycle_time_status_long
     WHERE machine_cycle_time > 600;
 GO
 
--- ===========================
--- Scalar Function for Cycle Time Status
--- ===========================
+-- Suggestion 4: Additional filtered index for yield
+CREATE NONCLUSTERED INDEX IX_cycle_time_yield_high
+    ON staging.forcam.cycle_time(yield)
+    WHERE yield > 100;
+GO
 
-CREATE OR ALTER FUNCTION staging.forcam.fn_getCycleTimeStatus(
+-- ===========================
+-- Optimized (Inline Table-Valued) Function for Cycle Time Status
+-- ===========================
+-- Suggestion 5: Replace scalar function with inline table-valued function
+CREATE OR ALTER FUNCTION staging.forcam.fn_getCycleTimeStatus_ITVF(
     @cycleTime DECIMAL(10,4),
     @minCycleTime DECIMAL(10,4),
     @maxCycleTime DECIMAL(10,4)
 )
-RETURNS NVARCHAR(50)
+RETURNS TABLE
 AS
-BEGIN
-    IF @minCycleTime IS NULL OR @maxCycleTime IS NULL
-        RETURN 'NO_THRESHOLD';
-    IF @cycleTime < @minCycleTime
-        RETURN 'TOO_SHORT';
-    IF @cycleTime > @maxCycleTime
-        RETURN 'TOO_LONG';
-    RETURN 'OK';
-END;
+RETURN
+    SELECT
+        CASE
+            WHEN @minCycleTime IS NULL OR @maxCycleTime IS NULL THEN 'NO_THRESHOLD'
+            WHEN @cycleTime < @minCycleTime THEN 'TOO_SHORT'
+            WHEN @cycleTime > @maxCycleTime THEN 'TOO_LONG'
+            ELSE 'OK'
+        END AS cycle_time_status;
 GO
 
--- ===========================
--- Optimized View Using Scalar Function
--- ===========================
+-- Old scalar function remains for compatibility, but recommend using the ITVF above.
 
+-- ===========================
+-- Optimized View Using Cycle Time Status Function
+-- ===========================
 BEGIN TRY
     IF OBJECT_ID('staging.forcam.cycle_time_with_status', 'V') IS NOT NULL
         DROP VIEW staging.forcam.cycle_time_with_status;
 END TRY
 BEGIN CATCH
-    INSERT INTO staging.forcam.error_log(error_message, error_date)
-    VALUES (ERROR_MESSAGE(), GETDATE());
+    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
+    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
 END CATCH;
 GO
 
@@ -167,7 +189,8 @@ SELECT
     ct.*,
     t.min_cycle_time,
     t.max_cycle_time,
-    staging.forcam.fn_getCycleTimeStatus(ct.machine_cycle_time, t.min_cycle_time, t.max_cycle_time) AS cycle_time_status
+    -- Use ITVF for status calculation
+    (SELECT cycle_time_status FROM staging.forcam.fn_getCycleTimeStatus_ITVF(ct.machine_cycle_time, t.min_cycle_time, t.max_cycle_time)) AS cycle_time_status
 FROM 
     staging.forcam.cycle_time ct
 LEFT JOIN 
@@ -189,7 +212,7 @@ BEGIN
     
     DECLARE @escaped NVARCHAR(MAX) = REPLACE(@input, '"', '""');
     
-    IF CHARINDEX(',', @escaped) > 0 OR CHARINDEX('"', @escaped) > 0 OR CHARINDEX(CHAR(10), @escaped) > 0 OR CHARINDEX(CHAR(13), @escaped) > 0
+    IF CHARINDEX(', @escaped) > 0 OR CHARINDEX('"', @escaped) > 0 OR CHARINDEX(CHAR(10), @escaped) > 0 OR CHARINDEX(CHAR(13), @escaped) > 0
         SET @escaped = '"' + @escaped + '"';
     
     RETURN @escaped;
@@ -215,6 +238,16 @@ BEGIN
     RETURN @output;
 END;
 GO
+
+/* ===========================
+   Suggestion 9: UUID Uniqueness Validation
+   =========================== */
+-- Run this after data loads to ensure uuid is unique
+SELECT uuid, COUNT(*) as cnt
+FROM staging.forcam.cycle_time
+GROUP BY uuid
+HAVING COUNT(*) > 1;
+-- End of Suggestions
 
 /* ===========================
    Notes:
