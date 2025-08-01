@@ -1,63 +1,33 @@
-# ==============================
-# Enhanced PowerShell Script: import-forecam-csv.ps1
-# ==============================
-# Implements robust logging, error handling, retry logic, modular design
-# and configurability for importing Forecam CSV data to SQL Server
-
 Set-StrictMode -Version Latest
 
-# --- CONFIGURATION ---
-$Config = @{ 
-    RootPath    = "\\SUSA059A59\Output_Prod"
-    SqlScript   = "C:\Scripts\import_cycle_time.sql"
-    SqlServer   = "YourSqlServerName"
-    Database    = "staging"
-    LogFile     = "C:\Logs\forecam_import.log"
-    MaxRetries  = 3
-    DateFormat  = "yyyyMMdd"
-    ImportDate  = (Get-Date).AddDays(-1).ToString("yyyyMMdd") # Can be changed to support a range
+# CONFIGURATION
+$Config = @{
+    RootPath     = "\\SUSA059A59\Output_Prod"
+    SqlServer    = "YourSqlServerName"
+    Database     = "staging"
+    CsvSqlScript = "C:\Scripts\import_cycle_time.sql"
+    ApiSqlTable  = "staging.forcam.api_data"
+    LogFile      = "C:\Logs\forecam_import.log"
+    MaxRetries   = 3
+    DelaySeconds = 2
+    ApiBaseUrl   = "https://your-forecam-server/api"
+    ApiKey       = "your-api-key"  # or use OAuth bearer token
+    ApiEndpoints = @("/cycleTimes", "/operations", "/orders")
 }
 
 function Write-Log {
-    param(
-        [string]$Message,
-        [string]$Level = "INFO"
-    )
+    param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "[$timestamp] [$Level] $Message"
-    Add-Content -Path $Config.LogFile -Value $logEntry
+    Add-Content -Path $Config.LogFile -Value "$timestamp [$Level] $Message"
 }
 
-function Wait-For-FileUnlock {
-    param ([string]$Path)
-    for ($i = 0; $i -lt 5; $i++) {
-        try {
-            $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
-            if ($stream) { $stream.Close(); return $true }
-        } catch {
-            Start-Sleep -Seconds 2
-        }
-    }
-    return $false
-}
-
+# CSV FILE IMPORT SECTION
 function Import-CsvFile {
-    param(
-        [string]$FilePath,
-        [string]$MachineName,
-        [string]$BackupPath,
-        [string]$ErrorPath
-    )
-
-    if (-not (Wait-For-FileUnlock -Path $FilePath)) {
-        Write-Log "File is locked: $FilePath" "ERROR"
-        Move-Item -Path $FilePath -Destination $ErrorPath -Force
-        return
-    }
+    param([string]$FilePath, [string]$MachineName, [string]$BackupPath, [string]$ErrorPath)
 
     for ($attempt = 1; $attempt -le $Config.MaxRetries; $attempt++) {
         Write-Log "Attempt $attempt: Importing file $FilePath"
-        $result = & sqlcmd -S $Config.SqlServer -d $Config.Database -i $Config.SqlScript `
+        $result = & sqlcmd -S $Config.SqlServer -d $Config.Database -i $Config.CsvSqlScript `
             -v FilePath="'$FilePath'" -v MachineName="'$MachineName'" -b 2>&1
 
         if ($LASTEXITCODE -eq 0) {
@@ -66,16 +36,17 @@ function Import-CsvFile {
             return
         } else {
             Write-Log "FAILED: Attempt $attempt for $FilePath. Error: $result" "ERROR"
-            Start-Sleep -Seconds 2
+            Start-Sleep -Seconds $Config.DelaySeconds
         }
     }
 
     Move-Item -Path $FilePath -Destination $ErrorPath -Force
-    Write-Log "FINAL FAILURE: Moved $FilePath to Error folder after $Config.MaxRetries attempts." "ERROR"
+    Write-Log "FINAL FAILURE: Moved $FilePath to Error folder" "ERROR"
 }
 
-function Import-All-Machines {
-    Write-Log "Starting batch import for date $($Config.ImportDate)"
+function Import-AllCsvFiles {
+    Write-Log "Starting CSV Import"
+
     $folders = Get-ChildItem -Path $Config.RootPath -Directory
     foreach ($folder in $folders) {
         $MachineName = $folder.Name
@@ -86,133 +57,98 @@ function Import-All-Machines {
         New-Item -ItemType Directory -Path $BackupPath -Force | Out-Null
         New-Item -ItemType Directory -Path $ErrorPath -Force | Out-Null
 
-        $csvFiles = Get-ChildItem -Path $MachinePath -Filter "$($Config.ImportDate)*.csv" -File
+        $csvFiles = Get-ChildItem -Path $MachinePath -Filter "*.csv" -File
         foreach ($file in $csvFiles) {
             Import-CsvFile -FilePath $file.FullName -MachineName $MachineName `
                            -BackupPath $BackupPath -ErrorPath $ErrorPath
         }
     }
-    Write-Log "Batch import completed."
+
+    Write-Log "CSV Import Complete"
 }
 
-function Log-Heartbeat {
-    Write-Log "[HEARTBEAT] Watcher running..."
-}
+function Import-ApiData {
+    Write-Log "Starting API fetch and SQL import (Flattened JSON)"
 
-# --- FILE WATCHER FOR LIVE STREAM ---
-$watcher = New-Object System.IO.FileSystemWatcher
-$watcher.Path = $Config.RootPath
-$watcher.IncludeSubdirectories = $true
-$watcher.Filter = "*.csv"
-$watcher.EnableRaisingEvents = $true
+    foreach ($endpoint in $Config.ApiEndpoints) {
+        $page = 0
+        do {
+            $uri = "$($Config.ApiBaseUrl)$endpoint?page=$page"
+            $headers = @{ "Authorization" = "Bearer $($Config.ApiKey)" }
 
-Register-ObjectEvent $watcher "Created" -Action {
-    Start-Sleep -Seconds 5
-    $filePath = $Event.SourceEventArgs.FullPath
-    $machineName = Split-Path $filePath -Parent | Split-Path -Leaf
-    $machineFolder = Join-Path $Config.RootPath $machineName
-    $backup = Join-Path $machineFolder "Backup"
-    $error  = Join-Path $machineFolder "Error"
-
-    New-Item -ItemType Directory -Path $backup -Force | Out-Null
-    New-Item -ItemType Directory -Path $error -Force | Out-Null
-
-    Import-CsvFile -FilePath $filePath -MachineName $machineName `
-                   -BackupPath $backup -ErrorPath $error
-}
-
-# --- OPTIONAL: Run batch import on script startup ---
-Import-All-Machines
-
-# --- OPTIONAL: Log heartbeat every hour to confirm watcher health ---
-Register-ScheduledJob -Name "WatcherHeartbeat" -ScriptBlock {
-    Write-Log "[HEARTBEAT] Watcher is active."
-} -Trigger (New-JobTrigger -Once -At (Get-Date).AddMinutes(60) -RepetitionInterval (New-TimeSpan -Minutes 60) -RepetitionDuration ([TimeSpan]::MaxValue)) -ScheduledJobOption (New-ScheduledJobOption -RunElevated) | Out-Null
-# ================================
-# Parallel CSV Import Logic
-# ================================
-
-$yesterday = Get-Date (Get-Date).AddDays(-1).Date
-$folders = Get-ChildItem -Path $RootPath -Directory
-
-$filesToImport = @()
-
-foreach ($folder in $folders) {
-    $MachineName = $folder.Name
-    $MachinePath = Join-Path $RootPath $MachineName
-    $BackupPath  = Join-Path $MachinePath "Backup"
-    $ErrorPath   = Join-Path $MachinePath "Error"
-
-    New-Item -Path $BackupPath -ItemType Directory -Force | Out-Null
-    New-Item -Path $ErrorPath -ItemType Directory -Force | Out-Null
-
-    $csvFiles = Get-ChildItem -Path $MachinePath -Filter "*.csv" -File |
-        Where-Object { $_.LastWriteTime -ge $yesterday -and $_.Name -match "^\d{8}.*\.csv$" }
-
-    foreach ($file in $csvFiles) {
-        $filesToImport += [PSCustomObject]@{
-            FilePath     = $file.FullName
-            MachineName  = $MachineName
-            BackupPath   = $BackupPath
-            ErrorPath    = $ErrorPath
-        }
-    }
-}
-
-# Import all relevant files in parallel (PowerShell 7+)
-$filesToImport | ForEach-Object -Parallel {
-    param (
-        $FilePath, $MachineName, $BackupPath, $ErrorPath, $SqlServer, $Database, $SqlScript, $LogFile, $MaxRetries, $DelaySeconds
-    )
-
-    function Log-Message {
-        param ([string]$Message, [string]$Level = "INFO")
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        Add-Content -Path $LogFile -Value "$timestamp [$Level] $Message"
-    }
-
-    function Import-CsvFile {
-        param ([string]$FilePath, [string]$MachineName)
-        $retryCount = 0
-        $success = $false
-
-        while (-not $success -and $retryCount -lt $MaxRetries) {
             try {
-                & sqlcmd -S $SqlServer -d $Database -i $SqlScript `
-                    -v FilePath="'$FilePath'" `
-                    -v MachineName="'$MachineName'" `
-                    -b 2>&1 | Tee-Object -Variable output | Out-Null
+                $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
 
-                if ($LASTEXITCODE -eq 0) {
-                    Log-Message "Success: $FilePath"
-                    return $true
+                if ($response -and $response.items.Count -gt 0) {
+                    $connectionString = "Server=$($Config.SqlServer);Database=$($Config.Database);Integrated Security=True;"
+                    $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+                    $connection.Open()
+
+                    foreach ($item in $response.items) {
+                        $machine = $item.machineName
+                        $material = $item.materialNumber
+                        $cycle = $item.cycleTime
+                        $operation = $item.operationNumber
+                        $timestamp = Get-Date $item.timestamp -Format "yyyy-MM-dd HH:mm:ss"
+                        $jsonBlob = $item | ConvertTo-Json -Depth 10
+
+                        $cmd = $connection.CreateCommand()
+                        $cmd.CommandText = @"
+INSERT INTO staging.forcam.api_cycle_data
+(machine_name, material_number, cycle_time, operation_number, timestamp, json_blob)
+VALUES (@machine, @material, @cycle, @operation, @timestamp, @json)
+"@
+
+                        $cmd.Parameters.Add("@machine",   [System.Data.SqlDbType]::NVarChar, 100).Value = $machine
+                        $cmd.Parameters.Add("@material",  [System.Data.SqlDbType]::NVarChar, 100).Value = $material
+                        $cmd.Parameters.Add("@cycle",     [System.Data.SqlDbType]::Float).Value = $cycle
+                        $cmd.Parameters.Add("@operation", [System.Data.SqlDbType]::NVarChar, 100).Value = $operation
+                        $cmd.Parameters.Add("@timestamp", [System.Data.SqlDbType]::DateTime).Value = $timestamp
+                        $cmd.Parameters.Add("@json",      [System.Data.SqlDbType]::NVarChar, -1).Value = $jsonBlob
+
+                        $cmd.ExecuteNonQuery()
+                    }
+
+                    $connection.Close()
+                    Write-Log "Flattened JSON page $page from $endpoint inserted into SQL"
+                    $page++
                 } else {
-                    Log-Message "SQL failed: $FilePath - $output" "ERROR"
+                    break
                 }
             } catch {
-                Log-Message "Error: $FilePath - $_" "ERROR"
+                Write-Log "API Fetch/Insert error on $endpoint page $page: $_" "ERROR"
+                break
             }
-
-            Start-Sleep -Seconds $DelaySeconds
-            $retryCount++
-        }
-
-        return $false
+        } while ($true)
     }
 
-    # Import process
-    try {
-        $stream = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'None')
-        $stream.Close()
-    } catch {
-        Log-Message "Locked file (skipped): $FilePath" "WARNING"
-        return
+    Write-Log "Flattened API import complete"
+}
+
+# LIVE FILE WATCHER
+function Start-FileWatcher {
+    $watcher = New-Object System.IO.FileSystemWatcher
+    $watcher.Path = $Config.RootPath
+    $watcher.IncludeSubdirectories = $true
+    $watcher.Filter = "*.csv"
+    $watcher.EnableRaisingEvents = $true
+
+    Register-ObjectEvent $watcher "Created" -Action {
+        Start-Sleep -Seconds 5
+        $filePath = $Event.SourceEventArgs.FullPath
+        $machineName = Split-Path $filePath -Parent | Split-Path -Leaf
+        $backup = Join-Path (Split-Path $filePath -Parent) "Backup"
+        $error  = Join-Path (Split-Path $filePath -Parent) "Error"
+
+        Import-CsvFile -FilePath $filePath -MachineName $machineName `
+                       -BackupPath $backup -ErrorPath $error
     }
 
-    if (Import-CsvFile -FilePath $FilePath -MachineName $MachineName) {
-        Move-Item -Path $FilePath -Destination $BackupPath -Force
-    } else {
-        Move-Item -Path $FilePath -Destination $ErrorPath -Force
-    }
+    Write-Log "File watcher started"
+}
 
-} -ArgumentList $using:SqlServer, $using:Database, $using:SqlScript, $using:LogFile, $using:MaxRetries, $using:DelaySeconds
+# MAIN
+Import-AllCsvFiles
+Import-ApiData
+Start-FileWatcher
+
