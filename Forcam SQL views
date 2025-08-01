@@ -1,105 +1,102 @@
--- ================================
--- View: Minute-Level Summary
--- ================================
+-- ===============================================
+-- Views for Minute, Hourly, Daily, Weekly, Monthly, Quarterly summaries
+-- Compatible with staging.forcam.cycle_time schema and data types
+-- ===============================================
+
+-- Minute-Level Summary
 CREATE OR ALTER VIEW forcam.vw_minute_summary AS
 SELECT
     machine_name,
-    DATEADD(MINUTE, DATEDIFF(MINUTE, 0, timestamp), 0) AS minute_block,
+    DATEADD(MINUTE, DATEDIFF(MINUTE, 0, CAST([date] AS DATETIME) + CAST([time] AS DATETIME)), 0) AS minute_block,
     COUNT(*) AS total_cycles,
     AVG(machine_cycle_time) AS avg_cycle_time,
-    MIN(timestamp) AS first_entry,
-    MAX(timestamp) AS last_entry
+    MIN(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS first_entry,
+    MAX(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS last_entry
 FROM staging.forcam.cycle_time
 GROUP BY
     machine_name,
-    DATEADD(MINUTE, DATEDIFF(MINUTE, 0, timestamp), 0);
+    DATEADD(MINUTE, DATEDIFF(MINUTE, 0, CAST([date] AS DATETIME) + CAST([time] AS DATETIME)), 0);
 GO
 
--- ================================
--- View: Hourly Summary
--- ================================
+-- Hourly Summary
 CREATE OR ALTER VIEW forcam.vw_hourly_summary AS
 SELECT
     machine_name,
-    DATEADD(HOUR, DATEDIFF(HOUR, 0, timestamp), 0) AS hour_block,
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, CAST([date] AS DATETIME) + CAST([time] AS DATETIME)), 0) AS hour_block,
     COUNT(*) AS total_cycles,
     AVG(machine_cycle_time) AS avg_cycle_time,
-    MIN(timestamp) AS first_entry,
-    MAX(timestamp) AS last_entry
+    MIN(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS first_entry,
+    MAX(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS last_entry
 FROM staging.forcam.cycle_time
 GROUP BY
     machine_name,
-    DATEADD(HOUR, DATEDIFF(HOUR, 0, timestamp), 0);
+    DATEADD(HOUR, DATEDIFF(HOUR, 0, CAST([date] AS DATETIME) + CAST([time] AS DATETIME)), 0);
 GO
 
--- ================================
--- View: Daily Summary
--- ================================
+-- Daily Summary
 CREATE OR ALTER VIEW forcam.vw_daily_summary AS
 SELECT
     machine_name,
-    CAST(timestamp AS DATE) AS day_block,
+    CAST([date] AS DATE) AS day_block,
     COUNT(*) AS total_cycles,
     AVG(machine_cycle_time) AS avg_cycle_time,
-    MIN(timestamp) AS first_entry,
-    MAX(timestamp) AS last_entry
+    MIN(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS first_entry,
+    MAX(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS last_entry
 FROM staging.forcam.cycle_time
 GROUP BY
     machine_name,
-    CAST(timestamp AS DATE);
+    CAST([date] AS DATE);
 GO
 
--- ================================
--- View: Weekly Summary (ISO Week)
--- ================================
+-- Weekly Summary (ISO Week)
 CREATE OR ALTER VIEW forcam.vw_weekly_summary AS
 SELECT
     machine_name,
-    DATEPART(YEAR, timestamp) AS year,
-    DATEPART(ISO_WEEK, timestamp) AS iso_week,
+    DATEPART(YEAR, CAST([date] AS DATETIME)) AS year,
+    DATEPART(ISO_WEEK, CAST([date] AS DATETIME)) AS iso_week,
     COUNT(*) AS total_cycles,
     AVG(machine_cycle_time) AS avg_cycle_time,
-    MIN(timestamp) AS first_entry,
-    MAX(timestamp) AS last_entry
+    MIN(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS first_entry,
+    MAX(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS last_entry
 FROM staging.forcam.cycle_time
 GROUP BY
     machine_name,
-    DATEPART(YEAR, timestamp),
-    DATEPART(ISO_WEEK, timestamp);
+    DATEPART(YEAR, CAST([date] AS DATETIME)),
+    DATEPART(ISO_WEEK, CAST([date] AS DATETIME));
 GO
 
--- ================================
--- View: Monthly Summary
--- ================================
+-- Monthly Summary
 CREATE OR ALTER VIEW forcam.vw_monthly_summary AS
 SELECT
     machine_name,
-    FORMAT(timestamp, 'yyyy-MM') AS month_block,
+    CONCAT(
+        DATEPART(YEAR, CAST([date] AS DATETIME)), '-',
+        RIGHT('0' + CAST(DATEPART(MONTH, CAST([date] AS DATETIME)) AS VARCHAR(2)), 2)
+    ) AS month_block,
     COUNT(*) AS total_cycles,
     AVG(machine_cycle_time) AS avg_cycle_time,
-    MIN(timestamp) AS first_entry,
-    MAX(timestamp) AS last_entry
+    MIN(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS first_entry,
+    MAX(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS last_entry
 FROM staging.forcam.cycle_time
 GROUP BY
     machine_name,
-    FORMAT(timestamp, 'yyyy-MM');
+    DATEPART(YEAR, CAST([date] AS DATETIME)),
+    DATEPART(MONTH, CAST([date] AS DATETIME));
 GO
 
--- ================================
--- View: Quarterly Summary
--- ================================
+-- Quarterly Summary
 CREATE OR ALTER VIEW forcam.vw_quarterly_summary AS
 SELECT
     machine_name,
-    DATEPART(YEAR, timestamp) AS year,
-    DATEPART(QUARTER, timestamp) AS quarter,
+    DATEPART(YEAR, CAST([date] AS DATETIME)) AS year,
+    DATEPART(QUARTER, CAST([date] AS DATETIME)) AS quarter,
     COUNT(*) AS total_cycles,
     AVG(machine_cycle_time) AS avg_cycle_time,
-    MIN(timestamp) AS first_entry,
-    MAX(timestamp) AS last_entry
+    MIN(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS first_entry,
+    MAX(CAST([date] AS DATETIME) + CAST([time] AS DATETIME)) AS last_entry
 FROM staging.forcam.cycle_time
 GROUP BY
     machine_name,
-    DATEPART(YEAR, timestamp),
-    DATEPART(QUARTER, timestamp);
+    DATEPART(YEAR, CAST([date] AS DATETIME)),
+    DATEPART(QUARTER, CAST([date] AS DATETIME));
 GO
