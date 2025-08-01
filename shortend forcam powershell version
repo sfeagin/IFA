@@ -1,0 +1,217 @@
+# =====================
+# PowerShell Script: FORCAM API + CSV Import to SQL Server
+# =====================
+
+# =====================
+# API Notes & Authentication Info
+# =====================
+# API Base URL: e.g., https://your-forcam-api-host/api/v1
+# API Authentication: Bearer Token or OAuth2 (stored in Config.ps1)
+# Endpoints:
+#   /productionOrders
+#   /operations
+#   /cycleTimes
+# These should be set in $Config.ApiEndpoints as an array.
+
+# =====================
+# SQL Table Creation Logic (Forcam Example)
+# =====================
+<#[
+USE staging;
+IF OBJECT_ID('forcam.api_cycle_data', 'U') IS NOT NULL
+    DROP TABLE forcam.api_cycle_data;
+CREATE TABLE forcam.api_cycle_data (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    machine_name NVARCHAR(100),
+    material_number NVARCHAR(100),
+    cycle_time FLOAT,
+    operation_number NVARCHAR(100),
+    timestamp DATETIME,
+    json_blob NVARCHAR(MAX)
+);
+]#>
+
+# Load configuration
+. "$PSScriptRoot\Config.ps1"
+
+# =====================
+# Utility Functions
+# =====================
+
+function Write-Log {
+    param (
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $entry = "[$timestamp] [$Level] $Message"
+    try {
+        Add-Content -Path $Config.LogFile -Value $entry -ErrorAction Stop
+    } catch {
+        Write-Warning "Logging failed: $_"
+        Write-Output $entry
+    }
+}
+
+function Send-AlertEmail {
+    param (
+        [string]$Body,
+        [string]$Subject = $Config.EmailSubject
+    )
+    try {
+        $securePass = ConvertTo-SecureString $Config.SmtpPassword -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($Config.SmtpUser, $securePass)
+        Send-MailMessage -From $Config.EmailFrom -To $Config.EmailTo -Subject $Subject -Body $Body `
+            -SmtpServer $Config.SmtpServer -Port $Config.SmtpPort -UseSsl -Credential $cred
+        Write-Log "Alert email sent."
+    } catch {
+        Write-Log "Failed to send alert email: $_" "ERROR"
+    }
+}
+
+function Wait-For-FileUnlock {
+    param (
+        [string]$Path,
+        [int]$MaxAttempts = $Config.FileUnlockRetries,
+        [int]$DelaySeconds = $Config.FileUnlockWait
+    )
+    for ($i = 0; $i -lt $MaxAttempts; $i++) {
+        try {
+            $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+            if ($stream) {
+                $stream.Close()
+                return $true
+            }
+        } catch {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $false
+}
+
+function Import-AllForcamData {
+    foreach ($endpoint in $Config.ApiEndpoints) {
+        $page = 0
+        do {
+            $uri = "$($Config.ApiBaseUrl)$endpoint?page=$page"
+            $headers = @{ "Authorization" = "Bearer $($Config.ApiKey)" }
+
+            try {
+                $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+
+                if ($response -and $response.items.Count -gt 0) {
+                    $connection = New-Object System.Data.SqlClient.SqlConnection (
+                        "Server=$($Config.SqlServer);Database=$($Config.Database);Integrated Security=True;"
+                    )
+                    $connection.Open()
+
+                    foreach ($item in $response.items) {
+                        try {
+                            $cmd = $connection.CreateCommand()
+                            $cmd.CommandText = @"
+INSERT INTO $($Config.ApiSqlTable) (machine_name, material_number, cycle_time, operation_number, timestamp, json_blob)
+VALUES (@machine, @material, @cycle, @operation, @timestamp, @json)
+"@
+                            $cmd.Parameters.Add("@machine",   [System.Data.SqlDbType]::NVarChar, 100).Value = $item.machineName
+                            $cmd.Parameters.Add("@material",  [System.Data.SqlDbType]::NVarChar, 100).Value = $item.materialNumber
+                            $cmd.Parameters.Add("@cycle",     [System.Data.SqlDbType]::Float).Value = $item.cycleTime
+                            $cmd.Parameters.Add("@operation", [System.Data.SqlDbType]::NVarChar, 100).Value = $item.operationNumber
+                            $cmd.Parameters.Add("@timestamp", [System.Data.SqlDbType]::DateTime).Value = (Get-Date $item.timestamp)
+                            $cmd.Parameters.Add("@json",      [System.Data.SqlDbType]::NVarChar, -1).Value = ($item | ConvertTo-Json -Depth 10)
+
+                            $cmd.ExecuteNonQuery()
+                        } catch {
+                            Write-Log "Insert failed for item in $endpoint: $_" "ERROR"
+                            $global:ImportStats.ApiFailures++
+                            Send-AlertEmail -Body "Insert failure for API $endpoint item: $_"
+                        } finally {
+                            $cmd.Dispose()
+                        }
+                    }
+
+                    $connection.Close()
+                    $connection.Dispose()
+                    Write-Log "Inserted JSON page $page from $endpoint"
+                    $page++
+                } else {
+                    break
+                }
+            } catch {
+                Write-Log "API error at $endpoint page $page: $_" "ERROR"
+                $global:ImportStats.ApiFailures++
+                Send-AlertEmail -Body "API error at $endpoint page $page: $_"
+                break
+            }
+        } while ($true)
+    }
+}
+
+function Import-ApiData {
+    Write-Log "Starting API import..."
+    Import-AllForcamData
+    Write-Log "API import complete."
+}
+
+function Import-CsvData {
+    Write-Log "Starting CSV import..."
+    $files = Get-ChildItem -Path $Config.RootPath -Filter "*.csv" -Recurse
+
+    foreach ($file in $files) {
+        if (-not (Wait-For-FileUnlock -Path $file.FullName)) {
+            Write-Log "File locked too long: $($file.FullName)" "WARNING"
+            continue
+        }
+
+        try {
+            $importCmd = "sqlcmd -S $($Config.SqlServer) -d $($Config.Database) -i `"$($Config.CsvSqlScript)`" -v FilePath=`"$($file.FullName)`""
+            $result = Invoke-Expression $importCmd
+            Write-Log "Imported CSV: $($file.Name)"
+
+            if ($Config.MoveProcessed) {
+                $targetPath = Join-Path $Config.ArchivePath $file.Name
+                Move-Item -Path $file.FullName -Destination $targetPath -Force
+            }
+        } catch {
+            Write-Log "CSV import failed: $($file.FullName) -- $_" "ERROR"
+            Send-AlertEmail -Body "CSV import failed for $($file.FullName): $_"
+        }
+    }
+    Write-Log "CSV import complete."
+}
+
+function Watch-FileSystem {
+    Write-Log "Starting file watcher..."
+    $fsw = New-Object IO.FileSystemWatcher $Config.RootPath, "*.csv"
+    $fsw.IncludeSubdirectories = $true
+    $fsw.EnableRaisingEvents = $true
+
+    Register-ObjectEvent $fsw Created -Action {
+        Start-Sleep -Seconds 5
+        Import-CsvData
+    }
+
+    while ($true) {
+        Start-Sleep -Seconds 30
+    }
+}
+
+# =====================
+# MAIN EXECUTION
+# =====================
+
+$global:ImportStats = @{ ApiFailures = 0; CsvFailures = 0 }
+
+Write-Log "========== Script started =========="
+
+try {
+    Import-ApiData
+    Import-CsvData
+    if ($Config.UseFileWatcher) {
+        Watch-FileSystem
+    }
+} catch {
+    Write-Log "Script crashed: $_" "FATAL"
+    Send-AlertEmail -Body "Critical failure in import script: $_"
+}
+
+Write-Log "========== Script running =========="
