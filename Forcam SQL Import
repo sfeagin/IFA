@@ -1,109 +1,118 @@
--- ===============================================
--- SQL Import Script for Forecam CSV to cycle_time
--- ===============================================
--- This script is triggered by PowerShell with parameters:
---   $(FilePath)     : Full CSV path (e.g., \\server\machineX\20250720_data.csv)
---   $(MachineName)  : Folder name for the machine (e.g., "MachineX")
+:setvar FilePath "C:\Path\To\Sample.csv"
+:setvar MachineName "Unknown"
 
--- STEP 1: Create a temporary staging table matching CSV layout
-CREATE TABLE #temp_cycle_time (
-    [date] DATE,
-    [time] TIME(0),
-    workplace NVARCHAR(50),
-    ordernumber NVARCHAR(50),
-    operationnumber NVARCHAR(50),
-    materialnumber NVARCHAR(50),
-    te_sap REAL,
-    undefinedstoppage REAL,
-    refillingoperationalmaterials REAL,
-    machinewaitingonmaterial REAL,
-    shiftchangeover REAL,
-    preparation_time REAL,
-    machine_cycle_time REAL,
-    button_to_button_time REAL,
-    stroke_factor REAL,
-    cure_period REAL,
-    cure_period_factor REAL,
-    dstcalc REAL,
-    state NVARCHAR(50),
-    status_reason NVARCHAR(50),
-    plangroup NVARCHAR(50),
-    plangroup_counter NVARCHAR(50),
-    script_version NVARCHAR(50),
-    counter_total NVARCHAR(50)
-);
-GO
+-- Log import start (optional)
+PRINT 'Importing file: $(FilePath) for machine: $(MachineName)';
 
--- STEP 2: Load CSV data into temporary table using BULK INSERT
-BULK INSERT #temp_cycle_time
-FROM '$(FilePath)'
-WITH (
-    FORMATFILE = '\\SUSA059A59\Output_Prod\Cycle_Time_ChsP.xml',
-    FIRSTROW = 2,
-    FIELDTERMINATOR = ',',
-    ROWTERMINATOR = '\n',
-    ERRORFILE = '$(FilePath).error',
-    TABLOCK
-);
-GO
+-- Temp staging table for raw CSV import
+BEGIN TRY
+    IF OBJECT_ID('tempdb..#raw_cycle_data') IS NOT NULL DROP TABLE #raw_cycle_data;
+    
+    CREATE TABLE #raw_cycle_data (
+        [date] DATE,
+        [time] TIME(0),
+        workplace NVARCHAR(50),
+        order_number NVARCHAR(50),
+        operation_number NVARCHAR(50),
+        material_number NVARCHAR(50),
+        te_sap DECIMAL(10,4),
+        yield DECIMAL(10,4),
+        scrap DECIMAL(10,4),
+        rework DECIMAL(10,4),
+        undefined_stoppage DECIMAL(10,4),
+        refilling_operational_materials DECIMAL(10,4),
+        machine_waiting_on_material DECIMAL(10,4),
+        shift_changeover DECIMAL(10,4),
+        preparation_time DECIMAL(10,4),
+        machine_cycle_time DECIMAL(10,4),
+        button_to_button_time DECIMAL(10,4),
+        stroke_factor DECIMAL(10,4),
+        cure_period DECIMAL(10,4),
+        cure_period_factor DECIMAL(10,4),
+        dst_calc DECIMAL(10,4),
+        state NVARCHAR(50),
+        status_reason NVARCHAR(50),
+        plan_group NVARCHAR(50),
+        plan_group_counter NVARCHAR(50),
+        script_version NVARCHAR(50),
+        counter_total NVARCHAR(50)
+    );
+    
+    BULK INSERT #raw_cycle_data
+    FROM $(FilePath)
+    WITH (
+        FIRSTROW = 2,
+        FIELDTERMINATOR = ',',
+        ROWTERMINATOR = '0x0A',
+        TABLOCK,
+        CODEPAGE = '65001'
+    );
+    
+    -- Insert into main table with machine_name and UUID logic
+    INSERT INTO staging.forcam.cycle_time (
+        machine_name,
+        [date],
+        [time],
+        workplace,
+        order_number,
+        operation_number,
+        material_number,
+        te_sap,
+        yield,
+        scrap,
+        rework,
+        undefined_stoppage,
+        refilling_operational_materials,
+        machine_waiting_on_material,
+        shift_changeover,
+        preparation_time,
+        machine_cycle_time,
+        button_to_button_time,
+        stroke_factor,
+        cure_period,
+        cure_period_factor,
+        dst_calc,
+        state,
+        status_reason,
+        plan_group,
+        plan_group_counter,
+        script_version,
+        counter_total
+    )
+    SELECT 
+        $(MachineName),  -- Injected machine name
+        [date],
+        [time],
+        workplace,
+        order_number,
+        operation_number,
+        material_number,
+        te_sap,
+        yield,
+        scrap,
+        rework,
+        undefined_stoppage,
+        refilling_operational_materials,
+        machine_waiting_on_material,
+        shift_changeover,
+        preparation_time,
+        machine_cycle_time,
+        button_to_button_time,
+        stroke_factor,
+        cure_period,
+        cure_period_factor,
+        dst_calc,
+        ISNULL(state, 'UNKNOWN'),
+        ISNULL(status_reason, 'NONE'),
+        plan_group,
+        plan_group_counter,
+        script_version,
+        counter_total
+    FROM #raw_cycle_data;
 
--- STEP 3: Insert into the main table with machine name and computed UUID
-INSERT INTO staging.forcam.cycle_time (
-    machine_name,
-    [date],
-    [time],
-    workplace,
-    ordernumber,
-    operationnumber,
-    materialnumber,
-    te_sap,
-    undefinedstoppage,
-    refillingoperationalmaterials,
-    machinewaitingonmaterial,
-    shiftchangeover,
-    preparation_time,
-    machine_cycle_time,
-    button_to_button_time,
-    stroke_factor,
-    cure_period,
-    cure_period_factor,
-    dstcalc,
-    state,
-    status_reason,
-    plangroup,
-    plangroup_counter,
-    script_version,
-    counter_total
-)
-SELECT
-    $(MachineName),  -- Injected by PowerShell
-    [date],
-    [time],
-    workplace,
-    ordernumber,
-    operationnumber,
-    materialnumber,
-    te_sap,
-    undefinedstoppage,
-    refillingoperationalmaterials,
-    machinewaitingonmaterial,
-    shiftchangeover,
-    preparation_time,
-    machine_cycle_time,
-    button_to_button_time,
-    stroke_factor,
-    cure_period,
-    cure_period_factor,
-    dstcalc,
-    state,
-    status_reason,
-    plangroup,
-    plangroup_counter,
-    script_version,
-    counter_total
-FROM #temp_cycle_time;
-GO
-
--- STEP 4: Clean up the temp table
-DROP TABLE #temp_cycle_time;
-GO
+END TRY
+BEGIN CATCH
+    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
+    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
+    THROW;
+END CATCH;
