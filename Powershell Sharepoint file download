@@ -1,50 +1,422 @@
-# List of SharePoint Excel files to download
-$dateien = @("Hdlp-Actual.xlsx","Shap-Actual.xlsx","Chsp-Actual.xlsx","Ujap-Actual.xlsx")
+# CONFIGURATION
+$Config = @{
+    RootPath       = "\\SUSA059A59\Output_Prod"
+    SqlServer      = "YourSqlServerName"
+    Database       = "staging"
+    CsvSqlScript   = "C:\Scripts\import_cycle_time.sql"
+    ApiSqlTable    = "staging.forcam.api_cycle_data"
+    LogFile        = "C:\Logs\forecam_import.log"
+    MaxRetries     = 3
+    DelaySeconds   = 2
+    ApiBaseUrl     = "https://your-forecam-server/api"
+    ApiKey         = "your-api-key"  # or use OAuth bearer token
+    ApiEndpoints   = @("/cycleTimes", "/operations", "/orders")
+    FileUnlockWait = 5   # seconds to wait before assuming file is unlocked
+    FileUnlockRetries = 6 # number of attempts to check for file unlock
 
-# Load SharePoint client libraries
-Add-Type -Path 'C:\Program Files\Common Files\Microsoft Shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.dll' -ErrorAction Stop
-Add-Type -Path 'C:\Program Files\Common Files\Microsoft Shared\Web Server Extensions\16\ISAPI\Microsoft.SharePoint.Client.Runtime.dll' -ErrorAction Stop
-
-# Prompt for credentials
-$user = Read-Host "Enter SharePoint username"
-$pass = Read-Host -AsSecureString "Enter SharePoint password"
-
-# SharePoint site and file locations
-$targetSiteUrl = "https://ifacloud.sharepoint.com/sites/PowerBiGWXAX/"
-$spFileUrlBase = "https://ifacloud.sharepoint.com/sites/PowerBiGWXAX/Freigegebene%20Dokumente/Actual"
-$outputFilePathBase = "E:\data_warehouse\components\KPI_opex\sharepoint_data"
-
-# Set TLS protocol
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# Set credentials
-$spCredential = New-Object Microsoft.SharePoint.Client.SharePointOnlineCredentials($user, $pass)
-$Context = New-Object Microsoft.SharePoint.Client.ClientContext($targetSiteUrl)
-$Context.Credentials = $spCredential
-
-try {
-    $Context.ExecuteQuery()
-} catch {
-    Write-Host "WARNING: executeQuery() failed, but proceeding..." -ForegroundColor Yellow
+    # Email alert settings (fill with your SMTP details)
+    SmtpServer     = "smtp.yourdomain.com"
+    SmtpPort       = 587
+    SmtpUser       = "alerts@yourdomain.com"
+    SmtpPassword   = "your-email-password"
+    EmailFrom      = "alerts@yourdomain.com"
+    EmailTo        = "you@yourdomain.com"
+    EmailSubject   = "FORCAM Import Script Alert"
+    MaxParallelCsv = 5   # max parallel CSV import jobs
 }
 
-# Create authentication cookie
-$AuthenticationCookie = $Context.Credentials.GetAuthenticationCookie($targetSiteUrl, $true)
-$WebSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-$WebSession.Credentials = $Context.Credentials
-$WebSession.Cookies.SetCookies($targetSiteUrl, $AuthenticationCookie)
-$WebSession.Headers.Add("Accept", "application/json;odata=verbose")
+# Global counters for monitoring import stats
+$global:ImportStats = [PSCustomObject]@{
+    CsvSuccess = 0
+    CsvFailures = 0
+    ApiFailures = 0
+}
 
-# Download each file
-foreach ($file in $dateien) {
-    $plant = $file.Substring(0, 4)
-    $spFileUrl = "$spFileUrlBase/$plant/$file"
-    $outputFilePath = Join-Path $outputFilePathBase $file
-
+<#
+.SYNOPSIS
+    Writes a timestamped message to the configured log file.
+.DESCRIPTION
+    Attempts to write a log entry to the file at $Config.LogFile.
+    If file write fails, falls back to console output and warning.
+.PARAMETER Message
+    The message text to log.
+.PARAMETER Level
+    The log level (e.g. INFO, ERROR). Defaults to INFO.
+#>
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
     try {
-        Invoke-WebRequest -Uri $spFileUrl -OutFile $outputFilePath -WebSession $WebSession -ErrorAction Stop
-        Write-Host "Downloaded $file to $outputFilePath" -ForegroundColor Green
+        Add-Content -Path $Config.LogFile -Value $logEntry -ErrorAction Stop
     } catch {
-        Write-Host "Failed to download $file from $spFileUrl" -ForegroundColor Red
+        Write-Warning "Logging failed: $_"
+        Write-Output $logEntry
     }
 }
+
+<#
+.SYNOPSIS
+    Sends an email alert using the configured SMTP settings.
+.DESCRIPTION
+    Sends an alert email with given body and optional subject.
+    Uses SMTP credentials defined in $Config.
+.PARAMETER Body
+    The email message body.
+.PARAMETER Subject
+    The email subject line. Defaults to $Config.EmailSubject.
+#>
+function Send-AlertEmail {
+    param(
+        [string]$Body,
+        [string]$Subject = $Config.EmailSubject
+    )
+    try {
+        $securePass = ConvertTo-SecureString $Config.SmtpPassword -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($Config.SmtpUser, $securePass)
+        Send-MailMessage -From $Config.EmailFrom -To $Config.EmailTo -Subject $Subject -Body $Body `
+            -SmtpServer $Config.SmtpServer -Port $Config.SmtpPort -UseSsl -Credential $cred
+        Write-Log "Alert email sent successfully"
+    } catch {
+        Write-Log "Failed to send alert email: $_" "ERROR"
+    }
+}
+
+<#
+.SYNOPSIS
+    Waits and checks whether a file is unlocked and ready for processing.
+.DESCRIPTION
+    Tries to open the file for reading with read/write share.
+    If unable, waits and retries up to $MaxAttempts times.
+.PARAMETER Path
+    Full file path to check.
+.PARAMETER MaxAttempts
+    Number of times to retry (default from config).
+.PARAMETER DelaySeconds
+    Delay between attempts in seconds (default from config).
+.RETURNS
+    $true if file is unlocked, $false if still locked after retries.
+#>
+function Wait-For-FileUnlock {
+    param(
+        [string]$Path,
+        [int]$MaxAttempts = $Config.FileUnlockRetries,
+        [int]$DelaySeconds = $Config.FileUnlockWait
+    )
+    for ($i = 0; $i -lt $MaxAttempts; $i++) {
+        try {
+            $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+            if ($stream) {
+                $stream.Close()
+                return $true
+            }
+        } catch {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Imports a single CSV file into SQL Server using sqlcmd and moves file on success/failure.
+.DESCRIPTION
+    Waits for file unlock before import.
+    Retries import up to MaxRetries times.
+    On success, moves CSV to Backup folder.
+    On failure, moves CSV to Error folder and sends email alert.
+.PARAMETER FilePath
+    Full path to CSV file.
+.PARAMETER MachineName
+    Machine name used as a variable in sqlcmd script.
+.PARAMETER BackupPath
+    Directory path where successful files are moved.
+.PARAMETER ErrorPath
+    Directory path where failed files are moved.
+#>
+function Import-CsvFile {
+    param(
+        [string]$FilePath,
+        [string]$MachineName,
+        [string]$BackupPath,
+        [string]$ErrorPath
+    )
+
+    if (-not (Wait-For-FileUnlock -Path $FilePath)) {
+        Write-Log "File locked too long, skipping: $FilePath" "ERROR"
+        $global:ImportStats.CsvFailures++
+        return
+    }
+
+    for ($attempt = 1; $attempt -le $Config.MaxRetries; $attempt++) {
+        Write-Log "Attempt $attempt: Importing file $FilePath"
+        $result = & sqlcmd -S $Config.SqlServer -d $Config.Database -i $Config.CsvSqlScript `
+            -v FilePath="'$FilePath'" -v MachineName="'$MachineName'" -b 2>&1
+
+        # Check exit code and error keywords in output to confirm success
+        if ($LASTEXITCODE -eq 0 -and -not ($result -match "error|failed|exception")) {
+            try {
+                Move-Item -Path $FilePath -Destination $BackupPath -Force
+                Write-Log "SUCCESS: Imported and moved $FilePath to Backup"
+                $global:ImportStats.CsvSuccess++
+            } catch {
+                Write-Log "Warning: Could not move $FilePath to Backup folder. $_" "WARNING"
+            }
+            return
+        } else {
+            Write-Log "FAILED: Attempt $attempt for $FilePath. Error: $result" "ERROR"
+            Start-Sleep -Seconds $Config.DelaySeconds
+        }
+    }
+
+    # If all retries failed, move to Error folder and send alert email
+    try {
+        Move-Item -Path $FilePath -Destination $ErrorPath -Force
+        Write-Log "FINAL FAILURE: Moved $FilePath to Error folder" "ERROR"
+        $global:ImportStats.CsvFailures++
+        Send-AlertEmail -Body "CSV import failed for file: $FilePath after $($Config.MaxRetries) attempts."
+    } catch {
+        Write-Log "Critical: Could not move $FilePath to Error folder after failure. $_" "ERROR"
+    }
+}
+
+<#
+.SYNOPSIS
+    Imports all CSV files found under configured root path in parallel jobs.
+.DESCRIPTION
+    For each machine folder under root, finds CSV files and imports them using parallel jobs.
+    Limits maximum parallel jobs to avoid system overload.
+    Waits for jobs to complete before finishing.
+#>
+function Import-AllCsvFiles {
+    Write-Log "Starting CSV Import"
+
+    $folders = Get-ChildItem -Path $Config.RootPath -Directory
+    foreach ($folder in $folders) {
+        $MachineName = $folder.Name
+        $MachinePath = Join-Path $Config.RootPath $MachineName
+        $BackupPath  = Join-Path $MachinePath "Backup"
+        $ErrorPath   = Join-Path $MachinePath "Error"
+
+        # Ensure backup and error folders exist
+        New-Item -ItemType Directory -Path $BackupPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $ErrorPath -Force | Out-Null
+
+        $csvFiles = Get-ChildItem -Path $MachinePath -Filter "*.csv" -File
+
+        $jobs = @()
+        foreach ($file in $csvFiles) {
+            # Limit parallel jobs to MaxParallelCsv
+            while ($jobs.Count -ge $Config.MaxParallelCsv) {
+                $finished = Wait-Job -Job $jobs -Any -Timeout 5
+                if ($finished) {
+                    $jobs = $jobs | Where-Object { $_.State -eq 'Running' }
+                }
+            }
+
+            # Start job for parallel CSV import
+            $jobs += Start-Job -ArgumentList $file.FullName, $MachineName, $BackupPath, $ErrorPath -ScriptBlock {
+                param($FilePath, $MachineName, $BackupPath, $ErrorPath)
+                # Minimal import logic inside job scope for simplicity
+                function Wait-For-FileUnlock {
+                    param(
+                        [string]$Path,
+                        [int]$MaxAttempts = 6,
+                        [int]$DelaySeconds = 5
+                    )
+                    for ($i = 0; $i -lt $MaxAttempts; $i++) {
+                        try {
+                            $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+                            if ($stream) {
+                                $stream.Close()
+                                return $true
+                            }
+                        } catch {
+                            Start-Sleep -Seconds $DelaySeconds
+                        }
+                    }
+                    return $false
+                }
+                function Write-Log {
+                    param([string]$Message, [string]$Level = "INFO")
+                    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    $logEntry = "[$timestamp] [$Level] $Message"
+                    Add-Content -Path "C:\Logs\forecam_import.log" -Value $logEntry
+                }
+
+                for ($attempt = 1; $attempt -le 3; $attempt++) {
+                    Write-Log "Attempt $attempt: Importing file $FilePath (job)"
+                    if (-not (Wait-For-FileUnlock -Path $FilePath)) {
+                        Write-Log "File locked too long, skipping: $FilePath (job)" "ERROR"
+                        return
+                    }
+                    $result = & sqlcmd -S "YourSqlServerName" -d "staging" -i "C:\Scripts\import_cycle_time.sql" `
+                        -v FilePath="'$FilePath'" -v MachineName="'$MachineName'" -b 2>&1
+                    if ($LASTEXITCODE -eq 0 -and -not ($result -match "error|failed|exception")) {
+                        try {
+                            Move-Item -Path $FilePath -Destination $BackupPath -Force
+                            Write-Log "SUCCESS: Imported and moved $FilePath to Backup (job)"
+                        } catch {
+                            Write-Log "Warning: Could not move $FilePath to Backup folder (job). $_" "WARNING"
+                        }
+                        return
+                    } else {
+                        Write-Log "FAILED: Attempt $attempt for $FilePath. Error: $result (job)" "ERROR"
+                        Start-Sleep -Seconds 2
+                    }
+                }
+                try {
+                    Move-Item -Path $FilePath -Destination $ErrorPath -Force
+                    Write-Log "FINAL FAILURE: Moved $FilePath to Error folder (job)" "ERROR"
+                } catch {
+                    Write-Log "Critical: Could not move $FilePath to Error folder after failure (job). $_" "ERROR"
+                }
+            }
+        }
+
+        # Wait for all started jobs to finish before continuing
+        $jobs | Wait-Job
+        $jobs | Remove-Job
+    }
+
+    Write-Log "CSV Import Complete"
+}
+
+<#
+.SYNOPSIS
+    Fetches paged JSON data from configured API endpoints and inserts into SQL Server.
+.DESCRIPTION
+    For each endpoint, repeatedly fetches paged data.
+    Inserts each JSON item into the database with parameterized SQL.
+    Logs errors and sends alert emails on failures.
+#>
+function Import-ApiData {
+    Write-Log "Starting API fetch and SQL import (Flattened JSON)"
+
+    foreach ($endpoint in $Config.ApiEndpoints) {
+        $page = 0
+        do {
+            $uri = "$($Config.ApiBaseUrl)$endpoint?page=$page"
+            $headers = @{ "Authorization" = "Bearer $($Config.ApiKey)" }
+
+            try {
+                $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+
+                if ($response -and $response.items.Count -gt 0) {
+                    $connectionString = "Server=$($Config.SqlServer);Database=$($Config.Database);Integrated Security=True;"
+                    $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+                    $connection.Open()
+
+                    foreach ($item in $response.items) {
+                        try {
+                            $machine = $item.machineName
+                            $material = $item.materialNumber
+                            $cycle = $item.cycleTime
+                            $operation = $item.operationNumber
+                            $timestamp = Get-Date $item.timestamp -Format "yyyy-MM-dd HH:mm:ss"
+                            $jsonBlob = $item | ConvertTo-Json -Depth 10
+
+                            $cmd = $connection.CreateCommand()
+                            $cmd.CommandText = @"
+INSERT INTO $($Config.ApiSqlTable)
+(machine_name, material_number, cycle_time, operation_number, timestamp, json_blob)
+VALUES (@machine, @material, @cycle, @operation, @timestamp, @json)
+"@
+
+                            $cmd.Parameters.Add("@machine",   [System.Data.SqlDbType]::NVarChar, 100).Value = $machine
+                            $cmd.Parameters.Add("@material",  [System.Data.SqlDbType]::NVarChar, 100).Value = $material
+                            $cmd.Parameters.Add("@cycle",     [System.Data.SqlDbType]::Float).Value = $cycle
+                            $cmd.Parameters.Add("@operation", [System.Data.SqlDbType]::NVarChar, 100).Value = $operation
+                            $cmd.Parameters.Add("@timestamp", [System.Data.SqlDbType]::DateTime).Value = $timestamp
+                            $cmd.Parameters.Add("@json",      [System.Data.SqlDbType]::NVarChar, -1).Value = $jsonBlob
+
+                            $cmd.ExecuteNonQuery()
+                        } catch {
+                            Write-Log "Failed to insert item with machine $($item.machineName): $_" "ERROR"
+                            $global:ImportStats.ApiFailures++
+                            Send-AlertEmail -Body "API insert failed for machine $($item.machineName): $_"
+                        } finally {
+                            if ($cmd) { $cmd.Dispose() }
+                        }
+                    }
+
+                    $connection.Close()
+                    $connection.Dispose()
+
+                    Write-Log "Flattened JSON page $page from $endpoint inserted into SQL"
+                    $page++
+                } else {
+                    break
+                }
+            } catch {
+                Write-Log "API Fetch/Insert error on $endpoint page $page: $_" "ERROR"
+                $global:ImportStats.ApiFailures++
+                Send-AlertEmail -Body "API fetch/insert error on endpoint $endpoint page $page: $_"
+                break
+            }
+        } while ($true)
+    }
+
+    Write-Log "Flattened API import complete"
+}
+
+<#
+.SYNOPSIS
+    Starts a filesystem watcher to detect new CSV files and trigger import.
+.DESCRIPTION
+    Watches configured RootPath recursively for new CSV file creation.
+    On file created, waits briefly then imports the file in a background job.
+#>
+function Start-FileWatcher {
+    $watcher = New-Object System.IO.FileSystemWatcher
+    $watcher.Path = $Config.RootPath
+    $watcher.IncludeSubdirectories = $true
+    $watcher.Filter = "*.csv"
+    $watcher.EnableRaisingEvents = $true
+
+    Register-ObjectEvent $watcher "Created" -Action {
+        Start-Sleep -Seconds 5  # wait briefly for file write completion
+        $filePath = $Event.SourceEventArgs.FullPath
+        $machineName = Split-Path $filePath -Parent | Split-Path -Leaf
+        $backup = Join-Path (Split-Path $filePath -Parent) "Backup"
+        $error  = Join-Path (Split-Path $filePath -Parent) "Error"
+
+        # Import new file in background job to avoid blocking watcher
+        Start-Job -ArgumentList $filePath, $machineName, $backup, $error -ScriptBlock {
+            param($FilePath, $MachineName, $BackupPath, $ErrorPath)
+            function Wait-For-FileUnlock {
+                param([string]$Path)
+                for ($i = 0; $i -lt 6; $i++) {
+                    try {
+                        $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+                        if ($stream) { $stream.Close(); return $true }
+                    } catch { Start-Sleep -Seconds 5 }
+                }
+                return $false
+            }
+            function Write-Log {
+                param([string]$Message, [string]$Level = "INFO")
+                $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                $logEntry = "[$timestamp] [$Level] $Message"
+                Add-Content -Path "C:\Logs\forecam_import.log" -Value $logEntry
+            }
+            if (-not (Wait-For-FileUnlock -Path $FilePath)) {
+                Write-Log "File locked too long, skipping: $FilePath" "ERROR"
+                return
+            }
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                Write-Log "Attempt $attempt: Importing file $FilePath (watcher job)"
+                $result = & sqlcmd -S "YourSqlServerName" -d "staging" -i "C:\Scripts\import_cycle_time.sql" `
+                    -v FilePath="'$FilePath'" -v MachineName="'$MachineName'" -b 2>&1
+                if ($LASTEXITCODE -eq 0 -and -not ($result -match "error|failed|exception")) {
+                    try {
+                        Move-Item -Path $FilePath -Destination $BackupPath -Force
+                        Write-Log "SUCCESS: Imported and moved $FilePath to Backup (watcher job)"
+                    } catch {
+                        Write-Log "Warning: Could not move $FilePath to Backup folder (watcher job). $_" "WARNING"
+                    }
+                    return
+                } else {
