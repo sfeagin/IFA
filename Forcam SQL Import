@@ -1,164 +1,111 @@
--- =============================================
--- Script: import_cycle_time.sql
--- Version: 1.1
--- Description: Imports validated CSV cycle time data using BULK INSERT and MERGE.
--- =============================================
+-- Version 1.2 - Supports CSV and JSON input
+-- Parameters: MachineName, FilePath, FileType
+-- Assumes UTF-8 files, Windows auth, and FORCAM structure
 
-:setvar FilePath "C:\Path\To\File.csv"
-:setvar MachineName "Unknown"
-
--- Declare constants
-DECLARE @RowTerminator NVARCHAR(10) = '0x0A';
-DECLARE @CodePage INT = 65001;
-DECLARE @MachineName NVARCHAR(100) = $(MachineName);
-DECLARE @FilePath NVARCHAR(4000) = $(FilePath);
-DECLARE @ScriptVersion NVARCHAR(10) = '1.1';
+DECLARE @MachineName NVARCHAR(100) = '$(MachineName)';
+DECLARE @FilePath NVARCHAR(500) = '$(FilePath)';
+DECLARE @FileType NVARCHAR(10) = '$(FileType)';
+DECLARE @ScriptVersion NVARCHAR(10) = '1.2';
 
 BEGIN TRY
     BEGIN TRANSACTION;
 
-    -- Drop temp table if it exists
-    IF OBJECT_ID('tempdb..#raw_cycle_data') IS NOT NULL DROP TABLE #raw_cycle_data;
+    IF @FileType = '.csv'
+    BEGIN
+        -- Load CSV to temp table
+        CREATE TABLE #raw_csv (
+            [date] DATE,
+            [time] TIME(0),
+            workplace NVARCHAR(50),
+            ordernumber NVARCHAR(50),
+            operationnumber NVARCHAR(50),
+            materialnumber NVARCHAR(50),
+            te_sap REAL
+        );
 
-    -- Create temp staging table
-    CREATE TABLE #raw_cycle_data (
-        [date] DATE,
-        [time] TIME(0),
-        workplace NVARCHAR(30),
-        order_number NVARCHAR(50),
-        operation_number NVARCHAR(50),
-        material_number NVARCHAR(50),
-        te_sap DECIMAL(10,4),
-        yield DECIMAL(10,4),
-        scrap DECIMAL(10,4),
-        rework DECIMAL(10,4),
-        undefined_stoppage DECIMAL(10,4),
-        refilling_operational_materials DECIMAL(10,4),
-        machine_waiting_on_material DECIMAL(10,4),
-        shift_changeover DECIMAL(10,4),
-        preparation_time DECIMAL(10,4),
-        machine_cycle_time DECIMAL(10,4),
-        button_to_button_time DECIMAL(10,4),
-        stroke_factor DECIMAL(10,4),
-        cure_period DECIMAL(10,4),
-        cure_period_factor DECIMAL(10,4),
-        dst_calc DECIMAL(10,4),
-        state NVARCHAR(30),
-        status_reason NVARCHAR(30),
-        plan_group NVARCHAR(30),
-        plan_group_counter NVARCHAR(30),
-        script_version NVARCHAR(10),
-        counter_total NVARCHAR(30)
-    );
-
-    -- Index for MERGE match performance
-    CREATE NONCLUSTERED INDEX IX_raw_cycle_unique ON #raw_cycle_data (
-        [date], [time], material_number, operation_number
-    );
-
-    -- BULK INSERT
-    BEGIN TRY
-        BULK INSERT #raw_cycle_data
+        BULK INSERT #raw_csv
         FROM @FilePath
         WITH (
             FIRSTROW = 2,
             FIELDTERMINATOR = ',',
-            ROWTERMINATOR = @RowTerminator,
-            CODEPAGE = @CodePage,
-            KEEPNULLS
+            ROWTERMINATOR = '0x0A',
+            CODEPAGE = '65001'
         );
-    END TRY
-    BEGIN CATCH
-        INSERT INTO staging.forcam.error_log (
-            error_message, error_date, error_severity, error_line,
-            machine_name, file_path, script_version
-        )
-        VALUES (
-            ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE(),
-            @MachineName, @FilePath, @ScriptVersion
-        );
-        ROLLBACK TRANSACTION;
-        THROW;
-    END CATCH
 
-    -- MERGE into main table
-    MERGE staging.forcam.cycle_time AS target
-    USING (
-        SELECT * FROM #raw_cycle_data
-        WHERE [date] IS NOT NULL AND [time] IS NOT NULL AND workplace IS NOT NULL
-    ) AS source
-    ON target.[date] = source.[date]
-        AND target.[time] = source.[time]
-        AND target.material_number = source.material_number
-        AND target.operation_number = source.operation_number
-        AND target.machine_name = @MachineName
-    WHEN NOT MATCHED THEN
-        INSERT (
-            machine_name,
-            [date],
-            [time],
-            workplace,
-            order_number,
-            operation_number,
-            material_number,
-            te_sap,
-            yield,
-            scrap,
-            rework,
-            undefined_stoppage,
-            refilling_operational_materials,
-            machine_waiting_on_material,
-            shift_changeover,
-            preparation_time,
-            machine_cycle_time,
-            button_to_button_time,
-            stroke_factor,
-            cure_period,
-            cure_period_factor,
-            dst_calc,
-            state,
-            status_reason,
-            plan_group,
-            plan_group_counter,
-            script_version,
-            counter_total
+        -- Insert with validation and merge
+        MERGE staging.forcam.cycle_time AS tgt
+        USING (
+            SELECT
+                @MachineName AS machine_name,
+                date,
+                time,
+                workplace,
+                ordernumber,
+                operationnumber,
+                materialnumber,
+                te_sap
+            FROM #raw_csv
+            WHERE date IS NOT NULL AND time IS NOT NULL AND workplace IS NOT NULL
+        ) AS src
+        ON tgt.machine_name = src.machine_name
+            AND tgt.date = src.date
+            AND tgt.time = src.time
+            AND tgt.materialnumber = src.materialnumber
+            AND tgt.operationnumber = src.operationnumber
+        WHEN NOT MATCHED THEN
+            INSERT (machine_name, [date], [time], workplace, ordernumber, operationnumber, materialnumber, te_sap)
+            VALUES (src.machine_name, src.date, src.time, src.workplace, src.ordernumber, src.operationnumber, src.materialnumber, src.te_sap);
+
+        DROP TABLE #raw_csv;
+    END
+
+    ELSE IF @FileType = '.json'
+    BEGIN
+        -- Load JSON to temp table
+        DECLARE @json NVARCHAR(MAX);
+        SELECT @json = BulkColumn FROM OPENROWSET (BULK @FilePath, SINGLE_CLOB) AS j;
+
+        WITH ParsedJSON AS (
+            SELECT *
+            FROM OPENJSON(@json)
+            WITH (
+                [date] DATE,
+                [time] TIME(0),
+                workplace NVARCHAR(50),
+                ordernumber NVARCHAR(50),
+                operationnumber NVARCHAR(50),
+                materialnumber NVARCHAR(50),
+                te_sap REAL
+            )
         )
-        VALUES (
-            @MachineName,
-            source.[date],
-            source.[time],
-            source.workplace,
-            source.order_number,
-            source.operation_number,
-            source.material_number,
-            source.te_sap,
-            source.yield,
-            source.scrap,
-            source.rework,
-            source.undefined_stoppage,
-            source.refilling_operational_materials,
-            source.machine_waiting_on_material,
-            source.shift_changeover,
-            source.preparation_time,
-            source.machine_cycle_time,
-            source.button_to_button_time,
-            source.stroke_factor,
-            source.cure_period,
-            source.cure_period_factor,
-            source.dst_calc,
-            COALESCE(source.state, 'UNKNOWN'),
-            COALESCE(source.status_reason, 'NONE'),
-            source.plan_group,
-            source.plan_group_counter,
-            source.script_version,
-            source.counter_total
-        );
+        MERGE staging.forcam.cycle_time AS tgt
+        USING (
+            SELECT
+                @MachineName AS machine_name,
+                date,
+                time,
+                workplace,
+                ordernumber,
+                operationnumber,
+                materialnumber,
+                te_sap
+            FROM ParsedJSON
+            WHERE date IS NOT NULL AND time IS NOT NULL AND workplace IS NOT NULL
+        ) AS src
+        ON tgt.machine_name = src.machine_name
+            AND tgt.date = src.date
+            AND tgt.time = src.time
+            AND tgt.materialnumber = src.materialnumber
+            AND tgt.operationnumber = src.operationnumber
+        WHEN NOT MATCHED THEN
+            INSERT (machine_name, [date], [time], workplace, ordernumber, operationnumber, materialnumber, te_sap)
+            VALUES (src.machine_name, src.date, src.time, src.workplace, src.ordernumber, src.operationnumber, src.materialnumber, src.te_sap);
+    END
 
     COMMIT TRANSACTION;
-
 END TRY
 BEGIN CATCH
-    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    ROLLBACK TRANSACTION;
 
     INSERT INTO staging.forcam.error_log (
         error_message, error_date, error_severity, error_line,
@@ -168,6 +115,7 @@ BEGIN CATCH
         ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE(),
         @MachineName, @FilePath, @ScriptVersion
     );
+
     THROW;
 END CATCH;
 
