@@ -1,17 +1,30 @@
-:setvar FilePath "C:\Path\To\Sample.csv"
+-- =============================================
+-- Script: import_cycle_time.sql
+-- Version: 1.1
+-- Description: Imports validated CSV cycle time data using BULK INSERT and MERGE.
+-- =============================================
+
+:setvar FilePath "C:\Path\To\File.csv"
 :setvar MachineName "Unknown"
 
--- Log import start (optional)
-PRINT 'Importing file: $(FilePath) for machine: $(MachineName)';
+-- Declare constants
+DECLARE @RowTerminator NVARCHAR(10) = '0x0A';
+DECLARE @CodePage INT = 65001;
+DECLARE @MachineName NVARCHAR(100) = $(MachineName);
+DECLARE @FilePath NVARCHAR(4000) = $(FilePath);
+DECLARE @ScriptVersion NVARCHAR(10) = '1.1';
 
--- Temp staging table for raw CSV import
 BEGIN TRY
+    BEGIN TRANSACTION;
+
+    -- Drop temp table if it exists
     IF OBJECT_ID('tempdb..#raw_cycle_data') IS NOT NULL DROP TABLE #raw_cycle_data;
-    
+
+    -- Create temp staging table
     CREATE TABLE #raw_cycle_data (
         [date] DATE,
         [time] TIME(0),
-        workplace NVARCHAR(50),
+        workplace NVARCHAR(30),
         order_number NVARCHAR(50),
         operation_number NVARCHAR(50),
         material_number NVARCHAR(50),
@@ -30,89 +43,131 @@ BEGIN TRY
         cure_period DECIMAL(10,4),
         cure_period_factor DECIMAL(10,4),
         dst_calc DECIMAL(10,4),
-        state NVARCHAR(50),
-        status_reason NVARCHAR(50),
-        plan_group NVARCHAR(50),
-        plan_group_counter NVARCHAR(50),
-        script_version NVARCHAR(50),
-        counter_total NVARCHAR(50)
+        state NVARCHAR(30),
+        status_reason NVARCHAR(30),
+        plan_group NVARCHAR(30),
+        plan_group_counter NVARCHAR(30),
+        script_version NVARCHAR(10),
+        counter_total NVARCHAR(30)
     );
-    
-    BULK INSERT #raw_cycle_data
-    FROM $(FilePath)
-    WITH (
-        FIRSTROW = 2,
-        FIELDTERMINATOR = ',',
-        ROWTERMINATOR = '0x0A',
-        TABLOCK,
-        CODEPAGE = '65001'
+
+    -- Index for MERGE match performance
+    CREATE NONCLUSTERED INDEX IX_raw_cycle_unique ON #raw_cycle_data (
+        [date], [time], material_number, operation_number
     );
-    
-    -- Insert into main table with machine_name and UUID logic
-    INSERT INTO staging.forcam.cycle_time (
-        machine_name,
-        [date],
-        [time],
-        workplace,
-        order_number,
-        operation_number,
-        material_number,
-        te_sap,
-        yield,
-        scrap,
-        rework,
-        undefined_stoppage,
-        refilling_operational_materials,
-        machine_waiting_on_material,
-        shift_changeover,
-        preparation_time,
-        machine_cycle_time,
-        button_to_button_time,
-        stroke_factor,
-        cure_period,
-        cure_period_factor,
-        dst_calc,
-        state,
-        status_reason,
-        plan_group,
-        plan_group_counter,
-        script_version,
-        counter_total
-    )
-    SELECT 
-        $(MachineName),  -- Injected machine name
-        [date],
-        [time],
-        workplace,
-        order_number,
-        operation_number,
-        material_number,
-        te_sap,
-        yield,
-        scrap,
-        rework,
-        undefined_stoppage,
-        refilling_operational_materials,
-        machine_waiting_on_material,
-        shift_changeover,
-        preparation_time,
-        machine_cycle_time,
-        button_to_button_time,
-        stroke_factor,
-        cure_period,
-        cure_period_factor,
-        dst_calc,
-        ISNULL(state, 'UNKNOWN'),
-        ISNULL(status_reason, 'NONE'),
-        plan_group,
-        plan_group_counter,
-        script_version,
-        counter_total
-    FROM #raw_cycle_data;
+
+    -- BULK INSERT
+    BEGIN TRY
+        BULK INSERT #raw_cycle_data
+        FROM @FilePath
+        WITH (
+            FIRSTROW = 2,
+            FIELDTERMINATOR = ',',
+            ROWTERMINATOR = @RowTerminator,
+            CODEPAGE = @CodePage,
+            KEEPNULLS
+        );
+    END TRY
+    BEGIN CATCH
+        INSERT INTO staging.forcam.error_log (
+            error_message, error_date, error_severity, error_line,
+            machine_name, file_path, script_version
+        )
+        VALUES (
+            ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE(),
+            @MachineName, @FilePath, @ScriptVersion
+        );
+        ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+
+    -- MERGE into main table
+    MERGE staging.forcam.cycle_time AS target
+    USING (
+        SELECT * FROM #raw_cycle_data
+        WHERE [date] IS NOT NULL AND [time] IS NOT NULL AND workplace IS NOT NULL
+    ) AS source
+    ON target.[date] = source.[date]
+        AND target.[time] = source.[time]
+        AND target.material_number = source.material_number
+        AND target.operation_number = source.operation_number
+        AND target.machine_name = @MachineName
+    WHEN NOT MATCHED THEN
+        INSERT (
+            machine_name,
+            [date],
+            [time],
+            workplace,
+            order_number,
+            operation_number,
+            material_number,
+            te_sap,
+            yield,
+            scrap,
+            rework,
+            undefined_stoppage,
+            refilling_operational_materials,
+            machine_waiting_on_material,
+            shift_changeover,
+            preparation_time,
+            machine_cycle_time,
+            button_to_button_time,
+            stroke_factor,
+            cure_period,
+            cure_period_factor,
+            dst_calc,
+            state,
+            status_reason,
+            plan_group,
+            plan_group_counter,
+            script_version,
+            counter_total
+        )
+        VALUES (
+            @MachineName,
+            source.[date],
+            source.[time],
+            source.workplace,
+            source.order_number,
+            source.operation_number,
+            source.material_number,
+            source.te_sap,
+            source.yield,
+            source.scrap,
+            source.rework,
+            source.undefined_stoppage,
+            source.refilling_operational_materials,
+            source.machine_waiting_on_material,
+            source.shift_changeover,
+            source.preparation_time,
+            source.machine_cycle_time,
+            source.button_to_button_time,
+            source.stroke_factor,
+            source.cure_period,
+            source.cure_period_factor,
+            source.dst_calc,
+            COALESCE(source.state, 'UNKNOWN'),
+            COALESCE(source.status_reason, 'NONE'),
+            source.plan_group,
+            source.plan_group_counter,
+            source.script_version,
+            source.counter_total
+        );
+
+    COMMIT TRANSACTION;
 
 END TRY
 BEGIN CATCH
-    INSERT INTO staging.forcam.error_log(error_message, error_date, error_severity, error_line)
-    VALUES (ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE());
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+
+    INSERT INTO staging.forcam.error_log (
+        error_message, error_date, error_severity, error_line,
+        machine_name, file_path, script_version
+    )
+    VALUES (
+        ERROR_MESSAGE(), GETDATE(), ERROR_SEVERITY(), ERROR_LINE(),
+        @MachineName, @FilePath, @ScriptVersion
+    );
     THROW;
 END CATCH;
+
