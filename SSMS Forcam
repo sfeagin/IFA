@@ -212,7 +212,7 @@ BEGIN
     
     DECLARE @escaped NVARCHAR(MAX) = REPLACE(@input, '"', '""');
     
-    IF CHARINDEX(', @escaped) > 0 OR CHARINDEX('"', @escaped) > 0 OR CHARINDEX(CHAR(10), @escaped) > 0 OR CHARINDEX(CHAR(13), @escaped) > 0
+    IF CHARINDEX(',', @escaped) > 0 OR CHARINDEX('"', @escaped) > 0 OR CHARINDEX(CHAR(10), @escaped) > 0 OR CHARINDEX(CHAR(13), @escaped) > 0
         SET @escaped = '"' + @escaped + '"';
     
     RETURN @escaped;
