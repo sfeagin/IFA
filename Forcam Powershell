@@ -4,7 +4,131 @@
 
 # Load Configuration
 . "$PSScriptRoot\Config.ps1"
+$Config = @{
+    ApiBaseUrl = "https://api.forcam.com"
+    ApiEndpoints = @("/productionOrders", "/operations", "/workplaces") # etc.
+    ApiSqlTable = "staging.forcam.api_cycle_data"
+    OutputFolder = "C:\Data\ForcamApi"
+    RootPath = "\\SUSA059A59\Output_Prod"
+    SqlServer = "YourSqlServerName"
+    Database = "staging"
+    CsvSqlScript = "C:\Scripts\import_cycle_time.sql"
+    MaxRetries = 3
+    DelaySeconds = 2
+    MaxParallelCsv = 5
+    UseFileWatcher = $true
+}
 
+# === VALIDATORS ===
+function Validate-Json($json) {
+    try {
+        $parsed = $json | ConvertFrom-Json
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Validate-Csv($jsonObject) {
+    return $jsonObject -is [System.Collections.IEnumerable] -and $jsonObject.Count -gt 0 -and $jsonObject[0].PSObject.Properties.Count -gt 0
+}
+
+# === API CALLER ===
+function Call-ApiWithRetries($url, $attempt = 1) {
+    try {
+        Write-Host "Calling: $url (Attempt $attempt)"
+        $response = Invoke-RestMethod -Uri $url -Headers @{ "Authorization" = "Bearer $AccessToken" } -Method Get
+        Start-Sleep -Seconds $SleepSeconds
+        return $response
+    } catch {
+        if ($attempt -lt $MaxRetries) {
+            Write-Warning " Attempt $attempt failed. Retrying..."
+            return Call-ApiWithRetries -url $url -attempt ($attempt + 1)
+        } else {
+            Write-Error "Failed after $MaxRetries attempts: $url"
+            return $null
+        }
+    }
+}
+
+# === RUN ALL ===
+foreach ($route in $AllRoutes) {
+    $page = 1
+    $nextUrl = "$BaseUrl$route"
+
+    do {
+        $response = Call-ApiWithRetries -url $nextUrl
+        if ($response -eq $null) { break }
+
+        # Convert and validate JSON
+        $json = $response | ConvertTo-Json -Depth 10
+        if (-not (Validate-Json $json)) {
+            Write-Warning "Invalid JSON received from $nextUrl"
+            break
+        }
+
+        $parsed = $response
+        $filenameSafe = ($route -replace '[^a-zA-Z0-9]', '_') + "_page$page"
+        $jsonFile = Join-Path $OutputFolder "$filenameSafe.json"
+        $csvFile  = Join-Path $OutputFolder "$filenameSafe.csv"
+
+        # Save JSON
+        $json | Out-File -FilePath $jsonFile -Encoding utf8
+        Write-Host "✅ Saved JSON: $jsonFile"
+
+        # Save CSV if valid
+        if (Validate-Csv $parsed.value) {
+            $parsed.value | Export-Csv -Path $csvFile -NoTypeInformation
+            Write-Host "📁 Saved CSV: $csvFile"
+        } else {
+            Write-Warning "⚠️ Not suitable for CSV export: $route"
+        }
+
+        # Handle pagination if nextLink exists
+        $nextUrl = $parsed.'@odata.nextLink'
+        $page++
+
+    } while ($nextUrl -ne $null)
+}
+# === ENDPOINTS ===
+$StaticEndpoints = @(
+    "/productionOrders",
+    "/operations",
+    "/workplaces",
+    "/workplaceGroups",
+    "/staffMembers",
+    "/callbacks"
+)
+
+$WorkplaceSubRoutes = @(
+    "/workplaces/{id}/devices",
+    "/workplaces/{id}/recordedOperatingStates",
+    "/workplaces/{id}/recordedOperationPhases",
+    "/workplaces/{id}/recordedOutputQuantities",
+    "/workplaces/{id}/shifts"
+)
+
+$OperationSubRoutes = @(
+    "/operations/{id}/scheduledDates",
+    "/operations/{id}/specification",
+    "/operations/{id}/productionResourceTools",
+    "/operations/{id}/recordedOperatingStates"
+)
+
+function Expand-Routes($routes, $ids) {
+    $expanded = @()
+    foreach ($route in $routes) {
+        foreach ($id in $ids) {
+            $expanded += $route -replace "\{id\}", $id
+        }
+    }
+    return $expanded
+}
+
+$AllRoutes = @()
+$AllRoutes += $StaticEndpoints
+$AllRoutes += Expand-Routes $WorkplaceSubRoutes $WorkplaceIds
+$AllRoutes += Expand-Routes $OperationSubRoutes $OperationIds
 # =====================
 # GLOBAL VARIABLES & COUNTERS
 # =====================
@@ -189,82 +313,99 @@ function Validate-And-Transform-ApiItem {
 
 function Import-ApiData {
     Write-Log "Starting API data import..."
-    Create-ApiSqlTableIfNeeded
+
+    $AccessToken = Get-AccessToken
 
     foreach ($endpoint in $Config.ApiEndpoints) {
-        $page = 0
-        while ($true) {
-            $uri = "$($Config.ApiBaseUrl)$endpoint?page=$page"
-            $headers = @{ "Authorization" = "Bearer $($Config.ApiKey)" }
+        $nextUrl = "$($Config.ApiBaseUrl)$endpoint"
+        $page = 1
 
-            try {
-                $response = Retry-Operation -Operation { Invoke-RestMethod -Uri $uri -Headers $headers -Method GET } -MaxRetries $Config.MaxRetries -DelaySeconds $Config.DelaySeconds -OperationName "API call $endpoint page $page"
+        do {
+            $response = Call-ApiWithRetries -url $nextUrl
+            if ($response -eq $null) { break }
 
-                if (-not $response -or $response.items.Count -eq 0) {
-                    Write-Log "No more data from API $endpoint page $page, moving to next endpoint."
-                    break
-                }
+            $jsonString = $response | ConvertTo-Json -Depth 10
+            if (-not (Validate-Json $jsonString)) {
+                Write-Log "Invalid JSON response from $nextUrl" "WARNING"
+                break
+            }
 
-                $conn = Get-SqlConnection
-                $transaction = $conn.BeginTransaction()
-                $successCount = 0
-                $failureCount = 0
+            $parsed = $response
+            $filenameSafe = ($endpoint -replace '[^a-zA-Z0-9]', '_') + "_page$page"
+            $jsonFile = Join-Path $Config.OutputFolder "$filenameSafe.json"
+            $csvFile  = Join-Path $Config.OutputFolder "$filenameSafe.csv"
 
-                foreach ($itemRaw in $response.items) {
-                    try {
-                        $item = Validate-And-Transform-ApiItem -Item $itemRaw
+            # Save JSON
+            $jsonString | Out-File -FilePath $jsonFile -Encoding utf8
+            Write-Host "Saved JSON: $jsonFile"
 
-                        $sql = @"
+            # Save CSV if valid
+            if (Validate-Csv $parsed.value) {
+                $parsed.value | Export-Csv -Path $csvFile -NoTypeInformation
+                Write-Host " Saved CSV: $csvFile"
+            } else {
+                Write-Warning "Not suitable for CSV export: $endpoint"
+            }
+
+            # Insert each item into SQL
+            $conn = Get-SqlConnection
+            $transaction = $conn.BeginTransaction()
+            $successCount = 0
+            $failureCount = 0
+
+            foreach ($itemRaw in $response.items) {
+                try {
+                    $item = Validate-And-Transform-ApiItem -Item $itemRaw
+
+                    $sql = @"
 INSERT INTO $($Config.ApiSqlTable)
 (machine_name, material_number, cycle_time, operation_number, timestamp, json_blob)
 VALUES
 (@machine, @material, @cycle, @operation, @timestamp, @json)
 "@
 
-                        $params = @{
-                            "@machine" = $item.machineName
-                            "@material" = $item.materialNumber
-                            "@cycle" = $item.cycleTime
-                            "@operation" = $item.operationNumber
-                            "@timestamp" = (Get-Date $item.timestamp)
-                            "@json" = ($itemRaw | ConvertTo-Json -Depth 10)
-                        }
-
-                        $cmd = $conn.CreateCommand()
-                        $cmd.CommandText = $sql
-                        $cmd.Transaction = $transaction
-                        foreach ($key in $params.Keys) {
-                            $cmd.Parameters.AddWithValue($key, $params[$key]) | Out-Null
-                        }
-                        $cmd.ExecuteNonQuery() | Out-Null
-                        $cmd.Dispose()
-                        $successCount++
-                    } catch {
-                        Write-Log "Validation or DB insert failed for item on $endpoint page $page: $_" "ERROR"
-                        $failureCount++
+                    $params = @{
+                        "@machine" = $item.machineName
+                        "@material" = $item.materialNumber
+                        "@cycle" = $item.cycleTime
+                        "@operation" = $item.operationNumber
+                        "@timestamp" = (Get-Date $item.timestamp)
+                        "@json" = ($itemRaw | ConvertTo-Json -Depth 10)
                     }
+
+                    $cmd = $conn.CreateCommand()
+                    $cmd.CommandText = $sql
+                    $cmd.Transaction = $transaction
+                    foreach ($key in $params.Keys) {
+                        $cmd.Parameters.AddWithValue($key, $params[$key]) | Out-Null
+                    }
+                    $cmd.ExecuteNonQuery() | Out-Null
+                    $cmd.Dispose()
+                    $successCount++
+                } catch {
+                    Write-Log "Validation or DB insert failed for item on $endpoint page $page: $_" "ERROR"
+                    $failureCount++
                 }
-
-                if ($failureCount -gt 0) {
-                    Write-Log "$failureCount record(s) failed to insert for $endpoint page $page" "WARNING"
-                }
-
-                $transaction.Commit()
-                $conn.Close()
-                $conn.Dispose()
-
-                Write-Log "API $endpoint page $page imported: $successCount records successfully."
-                $global:ImportStats.ApiSuccess += $successCount
-                $global:ImportStats.ApiFailures += $failureCount
-                $page++
-            } catch {
-                Write-Log "API import failed at $endpoint page $page: $_" "ERROR"
-                Send-AlertEmail -Body "API import failed at $endpoint page $page: $_"
-                $global:ImportStats.ApiFailures++
-                break
             }
-        }
+
+            if ($failureCount -gt 0) {
+                Write-Log "$failureCount record(s) failed to insert for $endpoint page $page" "WARNING"
+            }
+
+            $transaction.Commit()
+            $conn.Close()
+            $conn.Dispose()
+
+            Write-Log "API $endpoint page $page imported: $successCount records successfully."
+            $global:ImportStats.ApiSuccess += $successCount
+            $global:ImportStats.ApiFailures += $failureCount
+
+            $nextUrl = $parsed.'@odata.nextLink'
+            $page++
+            Start-Sleep -Seconds 1
+        } while ($nextUrl)
     }
+
     Write-Log "API data import completed."
 }
 
