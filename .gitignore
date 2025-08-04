@@ -1,0 +1,128 @@
+# =====================
+# FORCAM Import System .gitignore
+# =====================
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+logs/
+Logs/
+
+# Configuration files with sensitive data
+Config.local.ps1
+Config.production.ps1
+Config.secrets.ps1
+
+# Data files
+*.csv
+*.json
+*.xml
+data/
+Data/
+ForcamData/
+Output/
+Output_*/
+Backup/
+Error/
+Archive/
+
+# SQL Server files
+*.mdf
+*.ldf
+*.bak
+
+# PowerShell specific
+*.ps1xml
+$PROFILE.*
+
+# Visual Studio Code
+.vscode/
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux specific
+*~
+
+# Temporary PowerShell files
+*.ps1~
+*.psm1~
+
+# Error files from BULK INSERT
+*.errors
+
+# Email templates (may contain sensitive info)
+email_templates/
+
+# Test data
+test_data/
+sample_data/
+
+# Performance logs
+performance/
+perf_*.txt
+
+# Backup scripts (may contain credentials)
+backup_*.ps1
+restore_*.ps1
+
+# Local environment overrides
+.env
+.env.local
+environment.local.ps1
+
+# IDE files
+*.sublime-*
+*.suo
+*.user
+
+# Compiled PowerShell modules
+*.dll
+*.pdb
+
+# Package files
+*.nupkg
+*.snupkg
+
+# PowerShell Gallery cache
+PSGalleryModuleCache/
+
+# JetBrains IDEs
+.idea/
+
+# Vim
+*.swp
+*.swo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Local SQL scripts (may contain sensitive data)
+*_local.sql
+*_private.sql
+*_secret.sql
+
+# Reports and outputs
+reports/
+output/
+exports/
+
+# Keep example/template files
+!Config.example.ps1
+!sample_data.example.csv
